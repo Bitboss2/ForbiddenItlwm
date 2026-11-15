@@ -147,7 +147,7 @@ public:
     int awdlCoexTxTeardown(iwx_softc *);
     int awdlCoexTxSetup(iwx_softc *);
     static void iwx_newstate_task(void *);
-    void awdlCoexPublish() {}
+    static void awdlCoexPublish() {}
     int awdlCoexPickOwn(iwx_softc *, uint8_t *) { return 0; }
     int iwx_phy_ctxt_cmd(iwx_softc *, iwx_phy_ctxt *, int, int, int, int) { return 0; }
     uint8_t iwx_lookup_cmd_ver(iwx_softc *, int, int) { return 1; }
@@ -372,7 +372,8 @@ int main(int argc, char **argv) {
         } else if (suffix("shutdown")) {
             assert(!saw("mac-remove") && !saw("run-stop") && !saw("commit") && restarts == 0);
         } else if (suffix("failure") || suffix("timeout")) {
-            assert(!saw("mac-remove") && !saw("run-stop") && !saw("commit") && restarts == 1);
+            assert(!saw("mac-remove") && saw("run-stop") && saw("commit") && restarts == 0);
+            assert(awdlCoexBrokenGeneration == sc.sc_generation);
             if (scenario == "setup-queue-failure") assert(awdlCoexOrphanQueue == 1 && !saw("ring-reset"));
         } else {
             before("sta-remove", "binding"); before("binding", "mac-remove"); before("mac-remove", "run-stop");
@@ -387,7 +388,8 @@ int main(int argc, char **argv) {
         assert(!awdlCoexAdded && awdlCoexAddingGen == -1 && restarts == 0);
     } else if (scenario == "timeout" || scenario == "rollback-failure" || scenario == "tx-failure" ||
                scenario == "add-rollback-failure" || scenario == "add-timeout") {
-        assert(!saw("run-stop") && !saw("commit") && restarts == 1);
+        assert(saw("run-stop") && saw("commit") && restarts == 0);
+        assert(awdlCoexBrokenGeneration == sc.sc_generation);
         if (scenario == "add-timeout" || scenario == "add-rollback-failure") {
             assert(driver->awdlCoexListener(&sc, true) == EIO);
             assert(std::count(events.begin(), events.end(), "mac-add") == 1);
