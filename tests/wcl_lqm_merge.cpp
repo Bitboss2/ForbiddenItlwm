@@ -24,7 +24,7 @@ int main() {
     const auto *bytes = reinterpret_cast<const uint8_t *>(&update);
     assert(bytes[8] == 0 && bytes[9] == 0 && bytes[10] == 0);
     assert(bytes[0x12] == 0 && bytes[0x13] == 0); // no CCA
-    for (int noise : {0, 5}) {
+    for (int noise : {0, 5, -127, -121, -128}) {
         update = {};
         AirportWCL::setBeaconRadio(update, -60, noise);
         assert(!update.noiseValid && !update.snrValid);
@@ -32,5 +32,8 @@ int main() {
     update = {};
     AirportWCL::setBeaconRadio(update, 0, -95);
     assert(!update.noiseValid && !update.snrValid);
+    update = {};
+    AirportWCL::setBeaconRadio(update, -50, -120);
+    assert(update.noiseValid && update.noise == -120 && update.snr == 70);
     puts("WCL stop reset and measured SNR/noise: passed");
 }

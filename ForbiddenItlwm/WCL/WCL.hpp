@@ -90,7 +90,9 @@ static_assert(offsetof(SequoiaLqmUpdate, rssi) == 4, "Sequoia LQM RSSI offset");
 // Without them WCL sees 0 dBm, airportd rates en0's LinkQuality "off" (-2), and apsd then treats Wi-Fi
 // as unusable, so push, iMessage and other Apple services can't connect. Beacon reception is the
 // only other part filled unless measured SNR/noise are available. Those offsets
-// were checked against Tahoe 25G342 handleLqmUpdate. Core RSSI and CCA stay invalid.
+// were tested only on Tahoe 26.7.2/26.7.3 (25G332/25G342), not 26.7.1.
+// Population remains enabled on Tahoe; 26.7.1 still needs validation.
+// Core RSSI and CCA stay invalid.
 struct LqmBeaconUpdate {
     uint8_t rssiValid;
     uint8_t reserved0[3];
@@ -130,7 +132,8 @@ inline bool makeBeaconUpdate(uint32_t receivedDelta, LqmBeaconUpdate &out)
 }
 
 inline void setBeaconRadio(LqmBeaconUpdate &out, int32_t rssi, int16_t noise) {
-    if (rssi >= 0 || noise >= 0)
+    // sc_noise is 0 before statistics and -127 when no antenna has a reading.
+    if (rssi >= 0 || noise >= 0 || noise < -120)
         return;
     const int32_t snr = rssi - noise;
     if (snr < INT16_MIN || snr > INT16_MAX)
