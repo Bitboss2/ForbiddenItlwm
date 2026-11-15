@@ -16319,10 +16319,7 @@ iwx_newstate_task(void *psc)
     // Own the complete station transition, not just listener teardown. Firmware
     // waits below leave ic_state at RUN until the final net80211 commit, so the
     // cycle task must not use that old state to recreate a listener meanwhile.
-    if (awdlCoexStationTransitionGen == generation) {
-        splx(s);
-        return;
-    }
+    // newstate tasks are serialized on systq; never drop a requested transition.
     struct StationTransitionScope {
         uint32_t owner;
         explicit StationTransitionScope(int gen) : owner(++awdlCoexStationTransitionNext) {
@@ -16365,8 +16362,13 @@ iwx_newstate_task(void *psc)
                     // stop the new firmware generation's station on their return.
                     if (generation != sc->sc_generation || (sc->sc_flags & IWX_FLAG_SHUTDOWN))
                         goto out;
-                    if (err)
-                        goto out;
+                    if (err) {
+                        // AWDL is optional: quarantine it for this firmware generation,
+                        // but do not turn a station reassociation into a firmware reset.
+                        awdlCoexBrokenGeneration = generation;
+                        awdlCoexPublish();
+                        err = 0;
+                    }
                 }
                 err = that->iwx_run_stop(sc);
                 if (generation != sc->sc_generation || (sc->sc_flags & IWX_FLAG_SHUTDOWN))

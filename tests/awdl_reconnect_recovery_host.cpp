@@ -251,6 +251,22 @@ int main(int argc, char **argv) {
     awdlCoexAdded = scenario != "tx-only" && scenario != "no-owner";
     awdlCoexTxStaAdded = scenario == "tx-only" || scenario == "tx-failure" || scenario == "normal" || scenario == "remove-restart";
     awdlCoexQueue = awdlCoexTxStaAdded ? 1 : -1;
+    if (scenario == "exit-listener-failure" || scenario == "transition-guard") {
+        if (scenario == "exit-listener-failure")
+            awdlCoexBrokenGeneration = sc.sc_generation;
+        else {
+            awdlCoexStationTransitionGen = sc.sc_generation;
+            awdlCoexStationTransitionOwner = ++awdlCoexStationTransitionNext;
+        }
+        ItlIwx::iwx_newstate_task(&sc);
+        assert(saw("run-stop") && saw("deauth") && saw("commit"));
+        assert(sc.sc_ic.ic_state == IEEE80211_S_AUTH && restarts == 0);
+        if (scenario == "exit-listener-failure") {
+            assert(awdlCoexBrokenGeneration == sc.sc_generation);
+            assert(driver->awdlCoexListener(&sc, true) == EIO);
+        }
+        return 0;
+    }
     std::thread add;
     if (transitionCase()) {
         if (scenario == "transition-run") sc.ns_nstate = IEEE80211_S_RUN;
