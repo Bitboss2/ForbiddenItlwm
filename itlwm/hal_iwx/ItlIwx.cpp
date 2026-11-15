@@ -127,6 +127,14 @@
 
 // The firmware station for the AWDL peer, used by -itlawdlba.
 constexpr uint8_t kAwdlBaStationId = 3;
+
+// Channels whose NVM/LAR entry has IWX_NVM_CHANNEL_GO_CONCURRENT ("GO operation is allowed when connected to
+// BSS"), filled by iwx_init_channel_map. The listener may treat such a passive channel as usable while the
+// station is associated on the same channel or in the same 5 GHz UNII sub-band, as Linux does for
+// IEEE80211_CHAN_IR_CONCURRENT (cfg80211_ir_permissive_check_wdev). -itlawdlnoirconcurrent turns it off.
+static uint8_t awdlCoexIrConcurrent[howmany(IEEE80211_CHAN_MAX + 1, NBBY)];
+static bool awdlCoexIrConcurrentOff;
+static uint32_t awdlCoexIrConcurrentUsed; // Channel checks that passed only because of this rule.
 // -itlawdlcoextx: the second context's own station (the monitor's number, unused in station mode)
 // and queue, for AWDL frames sent beside Wi-Fi.
 static bool awdlCoexTx;
@@ -4144,6 +4152,10 @@ uint32_t *channel_profile_v4, int nchan_profile)
 
         hw_value = nvm_channels[ch_idx];
         channel = &ic->ic_channels[hw_value];
+        if ((ch_flags & IWX_NVM_CHANNEL_VALID) && (ch_flags & IWX_NVM_CHANNEL_GO_CONCURRENT))
+            setbit(awdlCoexIrConcurrent, hw_value);
+        else
+            clrbit(awdlCoexIrConcurrent, hw_value);
 
         if (!(ch_flags & IWX_NVM_CHANNEL_VALID)) {
             channel->ic_freq = 0;
@@ -4205,6 +4217,11 @@ uint32_t *channel_profile_v4, int nchan_profile)
               channel->ic_flags,
               (!IEEE80211_IS_CHAN_2GHZ(channel)) ? "5.2" : "2.4"));
     }
+    // Which of the listener's candidate channels allow IR-concurrent use (diagnostic, set on every map).
+    char irc[32];
+    snprintf(irc, sizeof(irc), "6=%d 44=%d 149=%d", isset(awdlCoexIrConcurrent, 6) ? 1 : 0,
+             isset(awdlCoexIrConcurrent, 44) ? 1 : 0, isset(awdlCoexIrConcurrent, 149) ? 1 : 0);
+    IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLCoexIrConcurrent", irc);
 }
 
 int ItlIwx::
@@ -5974,11 +5991,10 @@ static bool awdlCoexLostToRestart;
 // -itlawdlsameband (#16, test): while the station is on 2.4 GHz, keep the listener on channel 6, in the same
 // band, instead of time-sharing the radio across bands. Off by default until testers confirm it helps.
 static bool awdlCoexSameBand;
-// -itlawdlbaaskshared (test, #24): with the station's primary channel equal to the listener's, Block Ack
-// requests go out without waiting for the peer schedule's window. There the gate held back thousands of
-// requests and the agreement never formed; on any other station channel it formed within a second.
-static bool awdlCoexBaAskShared;
-static uint32_t awdlCoexBaAsksShared;
+// The station's own 80 MHz on 149-161 with another primary (1), or 160 MHz over 149-177 (2): the listener takes
+// 149 at 20 MHz, or 6 (ITLAWDLCoexOverlap). -itlawdloverlap80 keeps the old choice, for comparison.
+static uint8_t awdlCoexOverlapState;
+static bool awdlCoexOverlap80;
 // Block Ack on the shared context (#16, #24): when the listener shares the station's binding (without
 // -itlawdlcoexmulti, or in its fallback), receive and send Block Ack run there as well. Until 0.5.3 they
 // ran only with the listener on its own context, so a shared listener answered no ADDBA request and sent
@@ -5991,6 +6007,8 @@ static uint32_t awdlCoexBaPeerWidth;
 // each time sent the listener back to channel 6. Hints are now cleared only for a different usable country.
 static uint16_t awdlCoexHintCountry;
 static uint32_t awdlCoexCountryUnusableAnswers, awdlCoexHintClears;
+// How many beacon hints the last country change kept (#21).
+static uint32_t awdlCoexHintsKept;
 // The phone's latest 16-slot channel sequence (TLV 18), for diagnosis only (#24, #21): which channels it
 // spends its slots on. The parser follows PR #21 (zheznanohana). Nothing in the driver acts on it yet.
 static uint8_t awdlCoexPeerSeq[16];
@@ -6022,7 +6040,8 @@ static uint32_t awdlCoexRejectReasons[4];
 // Stage 4: receive Block Ack on the listener. The phone's ADDBA request gets a peer station (bound to the
 // listener's MAC context) and a firmware session, then an answer from the listener's queue. While a lot
 // of data arrives, promiscuous receive goes off (dedicated mode found that the firmware doesn't
-// acknowledge a session's frames with it on), and comes back when it's quiet.
+// acknowledge a session's frames with it on). By default it stays off for as long as the peer's firmware
+// station exists, and comes back when that station goes (see awdlCoexBaHandle).
 static bool awdlCoexBaPeerAdded, awdlCoexBaFilterOff;
 static ItlAWDL::PendingAddbaRequests awdlCoexBaRequestsPending;
 static uint8_t awdlCoexBaPeer[6], awdlCoexBaTidToken[8];
@@ -6104,10 +6123,13 @@ static uint32_t awdlCoexBaRefillKicks, awdlCoexBaRefillFrames;
 // slowly) or none (macOS had nothing to send)? After a refill kick, was it still empty with frames waiting?
 static uint32_t awdlCoexBaEmptyWithReady, awdlCoexBaEmptyNoReady, awdlCoexBaRefillStillEmptyReady;
 // -itlawdlcoexbafilterhyst: the old receive-filter policy (promiscuous back on after quiet seconds) for an
-// A/B test. By default promiscuous receive stays off while a receive BA session with the peer is open:
-// the firmware doesn't acknowledge a session's frames with it on, and three iPhone sysdiagnoses showed a
-// minute-long stall where the phone's frames went unacknowledged after it came back on.
+// A/B test. By default promiscuous receive stays off while the peer's firmware station exists (not only while
+// a receive BA session is open): the firmware doesn't acknowledge a station's frames with it on, and iPhone
+// sysdiagnoses showed a minute-long stall where the phone's frames went unacknowledged after it came back on.
+// A receive session is torn down after 60 s idle, but the station lives up to ten minutes, and a send we start
+// in that gap gets no replies until the phone opens a session itself: two minutes in the 2026-11-15 tests.
 static bool awdlCoexBaFilterHysteresis;
+static bool awdlCoexBaFilterBySession; // -itlawdlfilterbysession: the pre-#57 rule (off only during a receive session).
 // -itlawdlcoexawhold: outside an aggregated bulk send (which has its own station pause), awdl0 output waits
 // in macOS's queue while the active peer's fresh, calibrated schedule says it is away from our channel,
 // for at most the current away run (pauseLimitUS, 450 ms ceiling) per hold. iPhone sysdiagnoses showed an
@@ -6357,8 +6379,8 @@ static void awdlCoexPublish()
     root->setProperty("ITLAWDLCoexFirmwareGeneration", uint32_t(awdlCoexGeneration), 32);
     root->setProperty("ITLAWDLCoexCountryUnusableAnswers", awdlCoexCountryUnusableAnswers, 32);
     root->setProperty("ITLAWDLCoexHintClears", awdlCoexHintClears, 32);
-    root->setProperty("ITLAWDLCoexBaAsksShared", awdlCoexBaAsksShared, 32);
-    root->setProperty("ITLAWDLCoexBaAskShared", awdlCoexBaAskShared);
+    root->setProperty("ITLAWDLCoexHintsKept", awdlCoexHintsKept, 32);
+    root->setProperty("ITLAWDLCoexIrConcurrentUsed", awdlCoexIrConcurrentUsed, 32);
     root->setProperty("ITLAWDLCoexBaSharedOff", awdlCoexNoSharedBa);
     root->setProperty("ITLAWDLCoexBaPeerWidth", awdlCoexBaPeerWidth, 32);
     if (auto *seq = OSData::withBytes(awdlCoexPeerSeq, sizeof(awdlCoexPeerSeq))) {
@@ -6628,6 +6650,7 @@ static void awdlCoexPublish()
         root->setProperty("ITLAWDLCoexCountryLastStatus", awdlCoexCountryLastStatus, 32);
         root->setProperty("ITLAWDLCoexCountryLearned", awdlCoexCountryLearned);
         root->setProperty("ITLAWDLCoexBeaconHints", awdlCoexBeaconHints, 32);
+        root->setProperty("ITLAWDLCoexOverlap", awdlCoexOverlapState, 8);
         root->setProperty("ITLAWDLCoexCountryFailures", awdlCoexCountryFailures, 32);
         root->setProperty("ITLAWDLCoexMoveDrainTimeouts", awdlCoexMoveDrainTimeouts, 32);
         root->setProperty("ITLAWDLCoexMovePending", awdlCoexMovePending);
@@ -7211,10 +7234,28 @@ awdlCoexCycleTask(void *arg)
 
 // Passive (no initiating) for the listener: the NVM's passive flag, unless a beaconing AP was heard on that
 // channel (net80211's beacon hint, cleared when the country changes). Radar and no-ad-hoc are checked apart.
+// UNII sub-band of a 5 GHz channel for the IR-concurrent rule (0 = not 5 GHz or not grouped).
+static inline unsigned awdlCoexUnii(unsigned ch)
+{
+    return (ch >= 36 && ch <= 48) ? 1 : (ch >= 52 && ch <= 64) ? 2 : (ch >= 100 && ch <= 144) ? 3 :
+        (ch >= 149 && ch <= 165) ? 4 : 0;
+}
+
 static inline bool awdlCoexNoIr(const struct ieee80211com *ic, unsigned ch)
 {
-    return ch <= IEEE80211_CHAN_MAX && (ic->ic_channels[ch].ic_flags & IEEE80211_CHAN_PASSIVE) &&
-        !isset(ic->ic_beacon_hint, ch);
+    if (ch > IEEE80211_CHAN_MAX || !(ic->ic_channels[ch].ic_flags & IEEE80211_CHAN_PASSIVE) ||
+        isset(ic->ic_beacon_hint, ch))
+        return false;
+    // IR-concurrent: allowed while the station is associated on this channel or in the same UNII sub-band.
+    if (!awdlCoexIrConcurrentOff && isset(awdlCoexIrConcurrent, ch) && ic->ic_state == IEEE80211_S_RUN &&
+        ic->ic_bss && ic->ic_bss->ni_chan && ic->ic_bss->ni_chan != IEEE80211_CHAN_ANYC) {
+        const unsigned station = ieee80211_chan2ieee(const_cast<struct ieee80211com *>(ic), ic->ic_bss->ni_chan);
+        if (station == ch || (awdlCoexUnii(ch) && awdlCoexUnii(ch) == awdlCoexUnii(station))) {
+            ++awdlCoexIrConcurrentUsed;
+            return false;
+        }
+    }
+    return true;
 }
 
 // The one channel check for the listener's sending, used before building and again just before sending.
@@ -8127,8 +8168,8 @@ awdlCoexBaHandle(struct iwx_softc *sc)
             awdlCoexBaAnswerRetryUS = answerNow + 20000ULL;
         }
     }
-    // Promiscuous receive off for as long as a receive BA session is open (or, with the A/B flag, the old
-    // traffic hysteresis). It comes back on when the session or the peer station goes.
+    // Promiscuous receive off for as long as the peer's station exists (or, with the A/B flag, the old
+    // traffic hysteresis). It comes back on when the peer station goes. (PR #57)
     const bool filterWasOff = awdlCoexBaFilterOff;
     bool filterChange = false;
     if (awdlCoexBaFilterHysteresis) {
@@ -8151,7 +8192,14 @@ awdlCoexBaHandle(struct iwx_softc *sc)
             awdlCoexBaProbeUntilUS = answerNow + 250000ULL;
             awdlCoexBaEvent('P', awdlCoexBaTxToken, awdlCoexBaTxAsks, 0);
         }
-        const bool wantOff = receiveSession && answerNow >= awdlCoexBaProbeUntilUS;
+        // Off while the peer's station exists, not only while a receive TID is open. A receive TID is torn
+        // down after 60 s idle, but the station and our send agreement live for ten minutes. With promiscuous
+        // receive on in that gap the firmware does not acknowledge the phone's replies to a send we start, so
+        // nothing arrives (DataRxUcast frozen, SYNs unanswered) until the phone opens a session itself, which
+        // took about two minutes on 2026-11-15. canProbe (and #47's same-channel window) still applies only to a
+        // real receive session. -itlawdlfilterbysession keeps the old rule for an A/B.
+        const bool wantOff = (awdlCoexBaFilterBySession ? receiveSession : awdlCoexBaPeerAdded) &&
+            answerNow >= awdlCoexBaProbeUntilUS;
         if (wantOff != awdlCoexBaFilterOff) {
             awdlCoexBaFilter.off = wantOff;
             filterChange = true;
@@ -8273,11 +8321,8 @@ awdlCoexBaHandle(struct iwx_softc *sc)
     awdlCoexBaTxRestUntilUS = 0;
     if (awdlCoexBaTxLastAskUS && askNow - awdlCoexBaTxLastAskUS < 200000ULL)
         return;
-    // A calibrated schedule can rule out this window. Otherwise keep the ordinary retry cadence. With
-    // -itlawdlbaaskshared and the station on the listener's own primary channel, the window isn't waited for.
-    const bool sharedPrimary = awdlCoexBaAskShared && sc->sc_ic.ic_bss && sc->sc_ic.ic_bss->ni_chan &&
-        ieee80211_chan2ieee(&sc->sc_ic, sc->sc_ic.ic_bss->ni_chan) == awdlCoexChannel;
-    if (!sharedPrimary && awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.shouldPause(askNow)) {
+    // A calibrated schedule can rule out this window. Otherwise keep the ordinary retry cadence.
+    if (awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.shouldPause(askNow)) {
         ++awdlCoexBaAsksSkippedAway;
         ++awdlCoexAskSkipsSinceLast;
         return;
@@ -8300,8 +8345,6 @@ awdlCoexBaHandle(struct iwx_softc *sc)
     if (askLength && awdlCoexSendMgmt(sc, ask, askLength, kCoexSlotBaAsk)) {
         awdlCoexBaTxLastAskUS = askNow;
         ++awdlCoexBaTxAsks;
-        if (sharedPrimary)
-            ++awdlCoexBaAsksShared;
         awdlCoexBaEvent('A', awdlCoexBaTxToken, awdlCoexBaTxSeq,
                         (awdlCoexBaFilterOff ? 1U : 0U) |
                         (awdlCoexScheduleCurrent() && awdlCoexPeerSchedule.known() &&
@@ -15318,7 +15361,36 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
         *width = IWX_PHY_VHT_CHANNEL_MODE20;
         return 6;
     }
-    if (awdlCoexWide80FailedGen != sc->sc_generation && (ic->ic_channels[149].ic_flags & IEEE80211_CHAN_VHT80)) {
+    // The station's own 80 MHz block on 149-161 with another primary (153, 157 or 161): a listener context at
+    // 80 MHz on 149 covers the same 80 MHz with a different primary, and there the iPhone never saw the Mac
+    // (#26, router on 157/80). The listener takes 149 at 20 MHz instead. With the station at 160 MHz (or 80+80)
+    // over 149-177, a listener inside it got the station disconnected during transfers (AX201, PR #21), so 149
+    // is skipped and the listener falls back to 6. With the station on 149 itself (at 80 MHz or less) the
+    // listener shares its channel as before. -itlawdloverlap80 keeps the old choice, for comparison.
+    bool stationBlock149 = false, stationWide149 = false;
+    if (!awdlCoexOverlap80 && ic->ic_state == IEEE80211_S_RUN && ic->ic_bss && ic->ic_bss->ni_chan) {
+        const unsigned stationPrimary = ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan);
+        const uint8_t chw = ic->ic_bss->ni_chw;
+        if (stationPrimary >= 149 && stationPrimary <= 177) {
+            stationWide149 = chw == IEEE80211_CHAN_WIDTH_160 || chw == IEEE80211_CHAN_WIDTH_80P80;
+            stationBlock149 = !stationWide149 && chw == IEEE80211_CHAN_WIDTH_80 && stationPrimary <= 161 &&
+                stationPrimary != 149;
+        }
+    }
+    const uint8_t overlap = stationWide149 ? 2 : stationBlock149 ? 1 : 0;
+    if (overlap != awdlCoexOverlapState) {
+        awdlCoexOverlapState = overlap;
+        awdlCoexPublish();
+    }
+    if (stationWide149) {
+        if (usable(6)) {
+            *width = IWX_PHY_VHT_CHANNEL_MODE20;
+            return 6;
+        }
+        return 0;
+    }
+    if (!stationBlock149 && awdlCoexWide80FailedGen != sc->sc_generation &&
+        (ic->ic_channels[149].ic_flags & IEEE80211_CHAN_VHT80)) {
         bool all = true;
         for (unsigned ch = 149; ch <= 161; ch += 4)
             all = all && usable(ch);
@@ -15326,6 +15398,10 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
             *width = IWX_PHY_VHT_CHANNEL_MODE80;
             return 149;
         }
+    }
+    if (stationBlock149 && usable(149)) {
+        *width = IWX_PHY_VHT_CHANNEL_MODE20;
+        return 149;
     }
     if (usable(6)) {
         *width = IWX_PHY_VHT_CHANNEL_MODE20;
@@ -15358,16 +15434,30 @@ awdlCoexCountryAnswer(struct iwx_softc *sc)
         awdlCoexPublish();
         return;
     }
-    // Beacon hints belong to the old country's rules; Linux drops them on a regulatory change too. A
-    // detour through the firmware's world code isn't a change of country: the hints stay until a
-    // different usable country is answered. The firmware's own channel flags still apply on every use.
+    // Beacon hints belong to the old country's rules. A detour through the firmware's world code isn't a
+    // change of country: the hints stay until a different usable country is answered. Then only the hints
+    // for channels the new country's map (applied above) still has, and not as radar channels, are kept
+    // (#21: JP and CN both have 36-48, so a hint on 44 survives a JP-CN switch); the rest are dropped. A
+    // kept hint only lifts the passive flag, as it does today; the firmware's flags still apply on every use.
     const bool usableCountry = ItlAWDL::countryNoticeUsable(mcc, source);
     if (!usableCountry)
         ++awdlCoexCountryUnusableAnswers;
     else if (mcc != awdlCoexHintCountry) {
         if (awdlCoexHintCountry)
             ++awdlCoexHintClears;
-        memset(sc->sc_ic.ic_beacon_hint, 0, sizeof(sc->sc_ic.ic_beacon_hint));
+        struct ieee80211com *hic = &sc->sc_ic;
+        uint32_t kept = 0;
+        // The hint bitmap holds IEEE80211_CHAN_MAX bits (ieee80211_var.h).
+        for (unsigned ch = 0; ch < IEEE80211_CHAN_MAX; ++ch) {
+            if (!isset(hic->ic_beacon_hint, ch))
+                continue;
+            const struct ieee80211_channel &c = hic->ic_channels[ch];
+            if (c.ic_freq && !(c.ic_flags & IEEE80211_CHAN_DFS))
+                ++kept;
+            else
+                clrbit(hic->ic_beacon_hint, ch);
+        }
+        awdlCoexHintsKept = kept;
         awdlCoexHintCountry = mcc;
     }
     awdlCoexCountryAnswered = mcc;
@@ -15401,7 +15491,8 @@ awdlCoexRetarget(struct iwx_softc *sc)
     const int want = awdlCoexPickOwn(sc, &width);
     const int have = own->channel ? ieee80211_chan2ieee(ic, own->channel) : 0;
     const int haveWidth = awdlCoexOwnWidth;
-    if (!want || (want == have && (want != 149 || haveWidth == 80))) {
+    // Same channel and the same width: nothing to do. 149 at 20 MHz and at 80 MHz are different choices.
+    if (!want || (want == have && (width == IWX_PHY_VHT_CHANNEL_MODE80) == (haveWidth == 80))) {
         awdlCoexMovePending = false;
         return;
     }
@@ -20293,6 +20384,17 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         mccProbe = PE_parse_boot_argn("-itlmccprobe", &dummy, sizeof(dummy));
         if (mccProbe)
             timeout_set(&mccProbeTimer, mccProbeTimeout, sc);
+        awdlCoexIrConcurrentOff = PE_parse_boot_argn("-itlawdlnoirconcurrent", &dummy, sizeof(dummy));
+        // -itllog (#38): keep the driver's own log ring (the last 512 lines of XYLog, which otherwise only
+        // reaches kprintf) on in normal use, and publish it as ITLAWDLLog, so a failed wake or firmware restart
+        // can be read back afterwards with ioreg. Works with or without the AirDrop flags.
+        if (PE_parse_boot_argn("-itllog", &dummy, sizeof(dummy)) && !itlLogOn) {
+            itlLogOn = true;
+            if (OSSerializer *live = OSSerializer::forTarget(nullptr, itlLogSerialize)) {
+                IORegistryEntry::getRegistryRoot()->setProperty("ITLAWDLLog", live);
+                live->release();
+            }
+        }
         awdlCoexProbe = itlAWDLBuildAllowed() && PE_parse_boot_argn("-itlawdlcoexprobe", &dummy, sizeof(dummy)) &&
             !PE_parse_boot_argn("-itlawdlrx", &dummy, sizeof(dummy));
         // A new attach in the same loaded image starts with its timers allowed again.
@@ -20303,8 +20405,10 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         awdlCoexMulti = awdlCoexTx && PE_parse_boot_argn("-itlawdlcoexmulti", &dummy, sizeof(dummy));
         awdlCoexData = awdlCoexTx && PE_parse_boot_argn("-itlawdlcoexdata", &dummy, sizeof(dummy));
         awdlCoexBaTxEnabled = awdlCoexData && PE_parse_boot_argn("-itlawdlcoexbatx", &dummy, sizeof(dummy));
+        // On by default since 0.6.0 (PR #47; A/B on 149/149 and 44/44 by three testers). The old opt-in
+        // flag -itlawdlcoexsamechprobe is still accepted and changes nothing; -itlawdlnosamechprobe turns it off.
         awdlCoexSameChannelProbe.enabled = awdlCoexBaTxEnabled &&
-            PE_parse_boot_argn("-itlawdlcoexsamechprobe", &dummy, sizeof(dummy));
+            !PE_parse_boot_argn("-itlawdlnosamechprobe", &dummy, sizeof(dummy));
         awdlCoexBaPeerPauseEnabled = awdlCoexBaTxEnabled &&
             PE_parse_boot_argn("-itlawdlcoexpeerpause", &dummy, sizeof(dummy));
         awdlCoexBaTraceEnabled = awdlCoexBaTxEnabled &&
@@ -20313,6 +20417,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             PE_parse_boot_argn("-itlawdlcoexbarefill", &dummy, sizeof(dummy));
         awdlCoexBaFilterHysteresis = awdlCoexData &&
             PE_parse_boot_argn("-itlawdlcoexbafilterhyst", &dummy, sizeof(dummy));
+        awdlCoexBaFilterBySession = PE_parse_boot_argn("-itlawdlfilterbysession", &dummy, sizeof(dummy));
         awdlCoexAwHold = awdlCoexData && PE_parse_boot_argn("-itlawdlcoexawhold", &dummy, sizeof(dummy));
         // -itlawdlcoexlowlat is disabled: on the AX211 the firmware rejected LOW_LATENCY_CMD (error 35)
         // and each listener setup then took normal Wi-Fi down with it. The flag is ignored.
@@ -20339,7 +20444,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         if (PE_parse_boot_argn("itlawdlbtcoex", &requestedCoexBt, sizeof(requestedCoexBt)))
             awdlBtCoexRequest = requestedCoexBt;
         awdlCoexSameBand = PE_parse_boot_argn("-itlawdlsameband", &dummy, sizeof(dummy));
-        awdlCoexBaAskShared = PE_parse_boot_argn("-itlawdlbaaskshared", &dummy, sizeof(dummy));
+        awdlCoexOverlap80 = PE_parse_boot_argn("-itlawdloverlap80", &dummy, sizeof(dummy));
         awdlCoexNoSharedBa = PE_parse_boot_argn("-itlawdlnosharedba", &dummy, sizeof(dummy));
         awdlCoexMultiState = awdlCoexMulti ? "not-added" : "off";
         if (awdlCoexTx) {
