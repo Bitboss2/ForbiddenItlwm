@@ -94,4 +94,5 @@ with tempfile.TemporaryDirectory(prefix='forbidden-samech-') as d:
 import hashlib
 a=s.index('iwx_rx_pkt(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='ad845e262b41b5fa6989228d12bfddcf1ba40e9e88b2eef7a57c95425e9bce94'
 a=s.index('iwx_rx_mpdu_mq(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='761fc4d25edb443d274e376efdd0a7011f20cd0b2f408de292f0ed16a5f38470'
-a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='90bbe1c6eedcd61b01914291833d95580acbb96b996cc5bbd46d618f81f424a1'
+# iwx_rx_frame: 0.6.0 adds only the phone's 5 GHz channel tracking from its TLV 18 sequence (PR #21).
+a=s.index('iwx_rx_frame(struct');b=s.index("\nvoid ItlIwx::",a);assert hashlib.sha256(s[a:b].encode()).hexdigest()=='af39995bc5ce4c189ab8f28d870750f650072b3e12462aceefc3c1ec6e6efee5'
