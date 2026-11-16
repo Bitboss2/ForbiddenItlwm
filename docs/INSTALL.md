@@ -25,7 +25,7 @@ This beta has been tested on one hackintosh: an HP Envy x360 13-bf with an Intel
 | `IntelBluetoothFirmware.kext` | [OpenIntelWireless/IntelBluetoothFirmware](https://github.com/OpenIntelWireless/IntelBluetoothFirmware) | Tested with 2.5.1 |
 | `BlueToolFixup.kext` | [acidanthera/BrcmPatchRAM](https://github.com/acidanthera/BrcmPatchRAM) | Tested with 2.7.3 |
 
-**Disable `IntelBTPatcher.kext`.** It and BTLEAdvFixup hook the same function, and Lilu panics if two plugins do. BTLEAdvFixup takes over IntelBTPatcher's job.
+**Disable `IntelBTPatcher.kext`.** It and BTLEAdvFixup hook the same function, and Lilu panics if two plugins do. BTLEAdvFixup takes over IntelBTPatcher's job. For the same reason, don't use IntelBTUnified, which includes IntelBTPatcher's hook ([#32](https://github.com/retropineaple/ForbiddenItlwm/issues/32), [#51](https://github.com/retropineaple/ForbiddenItlwm/issues/51)); use IntelBluetoothFirmware and BlueToolFixup.
 
 ## Building
 
