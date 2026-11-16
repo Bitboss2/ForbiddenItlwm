@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.6.0-beta.1
+
+0.6.0-alpha.1's changes plus fixes found by a security review and in testing.
+
+- **Wi-Fi reconnects after macOS drops it.** When macOS disconnected Wi-Fi itself (switching or logging out of an account, for example) during one of the driver's background scans, the driver then refused every scan macOS asked for, so Wi-Fi never came back until it was turned off and on (#20, #63). Fixed, and on Tahoe and Sequoia the driver now also tells the router it's leaving, so the next join works on the first try. On the project's hackintosh Wi-Fi now rejoins in about 10 s after an account switch.
+- **AirDrop's listener survives reconnects ([PR #12](https://github.com/retropineaple/ForbiddenItlwm/pull/12), thanks to mingww64).** The listener starts only once the Wi-Fi connection is fully up, removing it waits for a setup still in progress, and a failure to remove it switches AirDrop off until the next firmware restart instead of restarting the firmware.
+- **Security review.** A review of 0.6.0-alpha.1 found and fixed problems in code that handles frames from nearby devices, requests from macOS, firmware messages and Bluetooth events. Most are in the Sonoma kext, whose Wi-Fi code takes paths the Tahoe and Sequoia kexts don't use: a 32-character network name returned bytes from kernel memory, scan results used memory that could already be freed, and shutdown freed memory while the hardware could still use it. On all kexts: more length checks on frames and firmware messages, AirDrop's announcement from macOS copied once and checked, a refused Wi-Fi join no longer leaves the Mac set up for an open network of that name, and failed starts clean up after themselves. The driver's log (`-itllog`) no longer holds network names, Wi-Fi handshakes or full Wi-Fi addresses. How to report security problems: [SECURITY.md](SECURITY.md).
+- **BTLEAdvFixup 0.9.2.**
+  - The new-LE-device pairing fix no longer takes over the Bluetooth controller's event pipe when a pairing round doesn't finish, and no longer writes to a buffer it couldn't prepare ([PR #61](https://github.com/retropineaple/ForbiddenItlwm/pull/61), thanks to takoyakiwhite). With 0.9.1 that could leave USB devices unresponsive until a cold boot, or panic.
+  - Pairing rounds are tracked per connection and given up after 2 s, so two devices pairing at once don't mix up their events.
+  - It no longer edits the Bluetooth stack's own request structure, and a removed advertising set no longer leaves its address to the next one.
+- **Link quality and signal ([PR #1](https://github.com/retropineaple/ForbiddenItlwm/pull/1), thanks to mingww64):** macOS's link quality goes back to "off" when the driver stops; on Tahoe the measured noise and signal-to-noise are reported where the card's firmware provides them.
+- **Tools:** `check_compat.sh` checks whether pf has turned off macOS's user-space network path, which can slow AirDrop's QUIC transfers; on Tahoe OpenCore's PowerTimeoutKernelPanic quirk causes it ([PR #59](https://github.com/retropineaple/ForbiddenItlwm/pull/59), thanks to kevineduardo). The hardware report scripts handle unusual user and computer names, and `airdrop_measure.sh` works under any locale (#21).
+- **Docs:** keep `-itlawdlcoexmulti` where channel 149 isn't available (from 0.6.0 the listener follows the iPhone to 44); a known limitation: AirDrop needs the Mac to be on a Wi-Fi network; `bluetoothd` crashing after hours (#62); the WPA2/WPA3 transition behaviour; the diagnostic flags.
+- **On Sonoma,** the scan counters (`ItlwmScanStats`) that 0.6.0-alpha.1 described now exist; alpha.1's Sonoma kext didn't have them.
+
 ## 0.6.0-alpha.1 (test build)
 
 A test build of 0.6.0's main changes, released to collect results. **Alpha** means it's for testers: it was tested on the project's hackintosh only where that hackintosh can test it (channel 149, Tahoe).

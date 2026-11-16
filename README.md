@@ -88,6 +88,7 @@ Please report what you find, working or not, in a [GitHub issue](https://github.
 - **Connects can be slow,** mostly iPhone → Mac.
 - **Normal Wi-Fi loses some speed while AirDrop's listener runs** (they share the radio).
 - **A long list of boot flags,** sleep untested, iPhone only (iPads and Macs not tried).
+- **AirDrop needs the Mac to be connected to a Wi-Fi network.** The AirDrop listener runs beside your Wi-Fi connection: with Wi-Fi on but no network joined, transfers stay on "Waiting". A real Mac doesn't need a network for this.
 - **WPA3:** on a WPA2/WPA3 transition network the Mac joins with WPA2 and without protected management frames, as AirportItlwm does. WPA3-only networks can't be joined.
 - **The Sonoma kext's Wi-Fi code** takes paths of its own (join, scan, keys, teardown) that the Tahoe and Sequoia kexts don't use. They had their first security review for 0.6.0; it hasn't been tested on hardware yet.
 

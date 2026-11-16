@@ -72,11 +72,23 @@ This is the main known problem. The time goes into the iPhone finding the Mac's 
 
 **Check for OpenCore Legacy Patcher root patches first,** not only the Wi-Fi ones: on one machine OCLP's audio patch alone left the list empty, with every scan failing, until OCLP's patches were removed (#20).
 
+**If the list stays empty after macOS dropped the connection** (for example when you switch or log out of an account) and only turning Wi-Fi off and on brings it back: fixed in 0.6.0-beta.1. A background scan interrupted by the disconnect left a flag set, and the driver then refused every scan macOS asked for; `ItlwmScanStats` shows it as a third `busy` number that keeps rising (`busy=0/0/112/0`). From 0.6.0-beta.1 the driver also tells your router it's leaving, so the next join works on the first try.
+
 From 0.6.0 the driver counts what happens to macOS's scan requests (#20, #24, #45). After the list has looked wrong for a while, run `ioreg -l -w0 | grep -E '"ItlwmScan(Stats|StatsSTA|Last)"'` and post the output with your report. It holds counts only, no network names. On Sonoma, `ItlwmScanStats` exists from 0.6.0-beta.1 (0.6.0-alpha.1 had no counters there).
 
 ## A new Bluetooth LE mouse or keyboard won't pair
 
 Fixed in BTLEAdvFixup 0.9.1 (from 0.5.4-beta.2, #27). Earlier versions, with IntelBTPatcher disabled, let a new LE mouse or keyboard connect but never finish pairing; devices paired before kept working. Update BTLEAdvFixup. If a device still won't pair with 0.9.1, check `ioreg -l -w0 -d 1 | grep -E '"BTLEAdv(PipeHooks|LengthRewrites|LengthFailures)"'` while pairing (`PipeHooks` should be 5, and `LengthRewrites` should go up) and report it.
+
+BTLEAdvFixup 0.9.2 (0.6.0-beta.1) also stops that fix from taking over the controller's event pipe when a pairing round doesn't finish ([PR #61](https://github.com/retropineaple/ForbiddenItlwm/pull/61)): with 0.9.1, that could leave USB devices unresponsive until a cold boot, or panic. `BTLEAdvLengthExpired` and `BTLEAdvLengthAborts` count rounds given up.
+
+## Bluetooth turns off after some hours, and `bluetoothd` crash reports say `KERN_MEMORY_ERROR`
+
+Seen on Tahoe 26.7.3 ([#62](https://github.com/retropineaple/ForbiddenItlwm/issues/62)). `bluetoothd` crashes with `EXC_BAD_ACCESS (SIGBUS)`, restarts a few times, and Bluetooth then shows as Off. The crash reports name APFS: "compressed data hash mismatch".
+
+BlueToolFixup and BTLEAdvFixup both patch `bluetoothd`'s code in memory, in the copy macOS shares between processes. When memory runs low, macOS drops part of a block of that code and reads it again later, and its integrity check then also covers the page that is still patched, which fails. It follows memory pressure, so it shows up after hours, not at boot.
+
+Until there's a fix: a full power-off (not a restart) brings Bluetooth back. Please add the crash reports to #62, with your RAM size and `memory_pressure | tail -1`.
 
 ## Wi-Fi is off or greyed out, and there's no `en0`
 
@@ -90,7 +102,8 @@ The kext can be loaded (`kmutil` lists it) while the driver itself failed to sta
 
 - Remove any flag listed under "Don't use" in [BOOT-FLAGS.md](BOOT-FLAGS.md).
 - A fast-rising `ITLAWDLCoexCountryNotices`, with `ITLAWDLCoexAdded` flipping between Yes and No, means the firmware is restarting around the listener. Boot without the `-itlawdl*` flags to confirm the station works on its own, then report it.
-- **Wi-Fi keeps dropping and reconnecting while the AirDrop flags are on, or channel 149 isn't available on your network:** remove `-itlawdlcoexmulti` and keep the rest. The listener then stays on your Wi-Fi network's channel instead of its own. Wi-Fi stays stable (#16), and AirDrop works where 149 can't be used (#29). From 0.5.4, iPhone → Mac still uses block ack in this setup (about 5 MB/s); Mac → iPhone is slower. `ITLAWDLCoexAddsAfterRestart` rising means the firmware is restarting underneath.
+- **Wi-Fi keeps dropping and reconnecting while the AirDrop flags are on:** remove `-itlawdlcoexmulti` and keep the rest. The listener then stays on your Wi-Fi network's channel instead of its own, and Wi-Fi stays stable (#16). iPhone → Mac still uses block ack in this setup (about 5 MB/s); Mac → iPhone is slower. `ITLAWDLCoexAddsAfterRestart` rising means the firmware is restarting underneath.
+- **Before 0.6.0, removing `-itlawdlcoexmulti` was also the advice where channel 149 isn't available (#29).** From 0.6.0 keep it: the listener follows the iPhone onto 44, and the same-channel fix ([PR #47](https://github.com/retropineaple/ForbiddenItlwm/pull/47)) only works with it (#63).
 - Use USB tethering from the iPhone to get online while you test.
 
 ## iMessage or other Apple services don't work over Wi-Fi
