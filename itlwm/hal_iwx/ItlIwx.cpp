@@ -5655,6 +5655,8 @@ static bool awdlRx;
 static bool awdlQueueProbe;
 static bool awdlQueueProbeAttempted;
 bool itlLogOn;
+// Away cap for full scans while associated, from itlwm_scanout (0 = default 120 TU).
+uint32_t itlScanMaxOutTU;
 bool itlLogStartup;
 // Fixed slots, so writers on any thread only need an atomic index. IOLog from
 // this kext does not reach the unified log, and XYLog is kprintf only.
@@ -13258,7 +13260,7 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
     int err, async = bgscan;
 #ifdef AIRPORT_WCL
     const auto timing = AirportWCL::scanTiming(ic->ic_wcl_scan_away_time_ms, bgscan,
-        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_FRAGMENTED_SCAN));
+        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_FRAGMENTED_SCAN), itlScanMaxOutTU);
     const uint32_t timeout = htole32(timing.suspendTU);
     const uint32_t maxOut = htole32(timing.maxOutTU);
 #else
@@ -13458,7 +13460,7 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan)
     uint16_t gen_flags = 0;
 #ifdef AIRPORT_WCL
     const auto timing = AirportWCL::scanTiming(ic->ic_wcl_scan_away_time_ms, bgscan,
-        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_FRAGMENTED_SCAN));
+        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_FRAGMENTED_SCAN), itlScanMaxOutTU);
     const uint32_t timeout = htole32(timing.suspendTU);
     const uint32_t maxOut = htole32(timing.maxOutTU);
 #else
@@ -13588,7 +13590,7 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     struct iwx_scan_channel_params_v6 *cp;
 #ifdef AIRPORT_WCL
     const auto timing = AirportWCL::scanTiming(ic->ic_wcl_scan_away_time_ms, bgscan,
-        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_FRAGMENTED_SCAN));
+        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_FRAGMENTED_SCAN), itlScanMaxOutTU);
     const uint32_t timeout = htole32(timing.suspendTU);
     const uint32_t maxOut = htole32(timing.maxOutTU);
 #else
