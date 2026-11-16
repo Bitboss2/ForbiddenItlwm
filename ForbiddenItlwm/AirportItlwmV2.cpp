@@ -1764,6 +1764,14 @@ bool AirportItlwm::startDriver(IOService *provider)
             itlScanMaxOutTU = scanOut;
         setProperty("ItlwmScanMaxOutTU", itlScanMaxOutTU ? itlScanMaxOutTU : 120U, 32);
     }
+    // itlwm_lqmint=N (1..60 s): link-quality updates to WCL only on a 3 dB RSSI change or every N s.
+    {
+        extern uint32_t itlLqmMinIntervalSec;
+        uint32_t lqmInterval = 0;
+        if (PE_parse_boot_argn("itlwm_lqmint", &lqmInterval, sizeof(lqmInterval)) && lqmInterval >= 1 && lqmInterval <= 60)
+            itlLqmMinIntervalSec = lqmInterval;
+        setProperty("ItlwmLqmMinIntervalSec", itlLqmMinIntervalSec, 32);
+    }
 #endif
 
     if (!fHalService->attach(pciNub)) {
