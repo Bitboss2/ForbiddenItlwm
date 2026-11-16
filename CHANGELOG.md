@@ -33,6 +33,8 @@ The first beta of 0.6.0. Everything since 0.5.4-beta.2, including what 0.6.0-alp
 
 **Docs:** keep `-itlawdlcoexmulti` where channel 149 isn't available (the listener now follows the iPhone to 44); known limitations: AirDrop needs the Mac to be on a Wi-Fi network, and the WPA2/WPA3 transition behaviour; `bluetoothd` crashing after hours (#62); the diagnostic flags.
 
+**Tested on the project's hackintosh** (Tahoe 26.7.1, AX211, listener on 149): the release build runs, AirDrop at 16–23 MB/s both ways across this release's test builds, Wi-Fi rejoins in 8–13 s after an account switch, Bluetooth audio works. Channel 44 was confirmed by a tester in Japan, and 0.6.0-alpha.1 by testers on Sequoia. The Sequoia and Sonoma builds are built and checked offline; on Sonoma, AirDrop doesn't start yet ([#55](https://github.com/retropineaple/ForbiddenItlwm/issues/55)).
+
 ## 0.6.0-alpha.1 (test build)
 
 A test build of 0.6.0's main changes, released to collect results. **Alpha** means it's for testers: it was tested on the project's hackintosh only where that hackintosh can test it (channel 149, Tahoe).
