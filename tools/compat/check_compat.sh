@@ -466,6 +466,35 @@ else
     info "Skipped: the AirDrop build isn't running."
 fi
 
+# ---------------------------------------------------------------- network stack
+head1 "7. Network stack (QUIC for AirDrop)"
+# When pf holds rules macOS doesn't recognise, the kernel turns off the flowswitch transport agent
+# (net.link.generic.system.enable_netagent = 0). Network.framework then falls back from Skywalk
+# channel flows to plain sockets, QUIC's pacer stops working, and AirDrop's QUIC transfers degrade
+# (sharingd logs "quic_time_delta start time X is after end time Y" many times per transfer).
+# On Tahoe (kernel 25.6) OpenCore's PowerTimeoutKernelPanic quirk causes this by itself: it rewrites
+# the kernel string "com.apple" to "not.apple", and pf's anchor check uses the same string, so the
+# stock /etc/pf.conf (anchor "com.apple/*") counts as custom rules.
+FILTER_STATE=$(sysctl -n net.filter_state 2>/dev/null)
+NETAGENT=$(sysctl -n net.link.generic.system.enable_netagent 2>/dev/null)
+NET_STACK=""
+if [ -z "$NETAGENT" ]; then
+    info "Couldn't read net.link.generic.system.enable_netagent on this macOS."
+elif [ "$NETAGENT" = "0" ] && printf '%s' "$FILTER_STATE" | grep -q pf; then
+    NET_STACK=pf
+    warn "pf is marked incompatible (net.filter_state = $FILTER_STATE), so macOS turned off its user-space"
+    warn "network path (enable_netagent = 0). QUIC, which AirDrop uses, loses its pacing and transfers can be slower."
+    if [ "${OS_MAJOR:-0}" -ge 26 ] 2>/dev/null; then
+        warn "Most likely cause on Tahoe: OpenCore Kernel > Quirks > PowerTimeoutKernelPanic. If your hackintosh"
+        warn "doesn't need it (it stops a panic when a driver is slow to change power state), set it to false and reboot."
+    fi
+    info "Other causes: your own pf rules or a firewall app that loads pf anchors."
+elif [ "$NETAGENT" = "0" ]; then
+    warn "macOS's user-space network path is off (enable_netagent = 0, net.filter_state = '${FILTER_STATE}')."
+else
+    pass "pf state is normal and the user-space network path is on (enable_netagent = $NETAGENT)."
+fi
+
 # ---------------------------------------------------------------- verdict
 head1 "Verdict"
 case "$CARD_TIER" in
@@ -483,6 +512,9 @@ case "${CH149_STATE:-}" in
     law)        echo "  ${YEL}This country's rules don't allow 149 at 80 MHz. From 0.6.0 AirDrop uses channel 44 if your iPhone does and the firmware allows it; otherwise channel 6 (very slow).${RST}";;
     not-in-map) echo "  ${YEL}Neither 149 nor 44 at 80 MHz is in the channel map here, so AirDrop can only use channel 6 (very slow).${RST}";;
 esac
+if [ "$NET_STACK" = pf ]; then
+    echo "  ${YEL}pf has turned off macOS's user-space network path (section 7): AirDrop works, but transfers can be slower.${RST}"
+fi
 if [ "$BLOCKERS" -gt 0 ]; then
     echo "  ${RED}$BLOCKERS blocker(s) above stop it working on this Mac regardless of the card.${RST}"
 fi
