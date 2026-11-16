@@ -168,6 +168,29 @@ int main(){
         uint8_t ninth[5]={0x16,0x20,0x02,0x70,0};assert(extraRemoteReads(d,ninth,5,t0)==0&&!findLink(d,0x70));
         // Expired slots are reused.
         assert(extraRemoteReads(d,ninth,5,t0+kDataLengthExpiryNs+1)==2&&findLink(d,0x70)&&d.expired==kDataLengthLinks);
+
+        // PR #61: reads are wrapped only while a link waits, only into a buffer that can hold the
+        // longest rewritten event, and at most kMaxWrappedReads per round; a spent budget drops the round.
+        d=DataLengthState{};
+        assert(!wrapRead(d,t0,64));                                         // nothing waiting
+        assert(extraRemoteReads(d,readFeatures,5,t0)==2);
+        assert(!wrapRead(d,t0,kDataLengthEventLength-1)&&d.wrapped==0);     // buffer too small
+        for (uint32_t i=0;i<kMaxWrappedReads;++i) assert(wrapRead(d,t0,64));
+        assert(d.wrapped==kMaxWrappedReads&&dataLengthPending(d));
+        assert(!wrapRead(d,t0,64)&&!dataLengthPending(d)&&d.aborts==1);   // budget spent: round dropped
+        assert(!wrapRead(d,t0,64)&&d.aborts==1);
+        // A new round gets a full budget again.
+        assert(extraRemoteReads(d,readFeatures,5,t0)==2&&d.wrapped==0&&wrapRead(d,t0,64));
+        // An expired round isn't wrapped.
+        assert(!wrapRead(d,t0+kDataLengthExpiryNs+1,64)&&!dataLengthPending(d));
+        // A read nothing could be rewritten into drops every pending link; later events pass through.
+        assert(extraRemoteReads(d,readFeatures,5,t0)==2&&extraRemoteReads(d,readB,5,t0)==2);
+        abortLinks(d);
+        assert(!dataLengthPending(d)&&d.aborts==2);
+        memcpy(ev,real,14);assert(rewriteEvent(d,ev,14)==14&&!memcmp(ev,real,14));
+        // A reset keeps both counters.
+        const uint32_t exp=d.expired;
+        assert(extraRemoteReads(d,rst,3,t0)==0&&d.aborts==2&&d.expired==exp);
     }
     puts("BTLEAdvFixup HCI decisions: passed (host only)");
 }

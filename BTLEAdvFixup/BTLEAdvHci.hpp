@@ -130,6 +130,9 @@ enum : size_t { kPhyUpdateEventLength = 8, kDataLengthEventLength = 13 };
 // events could carry the wrong handle. An entry that gets no events (a controller may answer a duplicate
 // with a Command Status error only) expires after kDataLengthExpiryNs, so nothing waits forever.
 enum : unsigned { kDataLengthLinks = 8 };
+// At most this many interrupt reads are wrapped per round, whatever else happens (PR #61): a round that
+// never matches can't keep every read of the controller's event pipe wrapped until it expires.
+enum : uint32_t { kMaxWrappedReads = 24 };
 enum : uint64_t { kDataLengthExpiryNs = 2000000000ULL };
 struct DataLengthLink {
     uint16_t handle;       // 12-bit connection handle
@@ -140,6 +143,8 @@ struct DataLengthLink {
 struct DataLengthState {
     DataLengthLink links[kDataLengthLinks];
     uint32_t expired;      // entries given up after kDataLengthExpiryNs
+    uint32_t aborts;       // rounds dropped because nothing could be rewritten into a read (PR #61)
+    uint32_t wrapped;      // reads wrapped since the last round was armed
 };
 inline uint16_t dataLengthHandle(uint8_t low, uint8_t high) { return uint16_t((low | high << 8) & 0x0fff); }
 inline DataLengthLink *findLink(DataLengthState &s, uint16_t handle) {
@@ -163,6 +168,14 @@ inline bool expireLinks(DataLengthState &s, uint64_t nowNs) {
     }
     return waiting;
 }
+// Drops every pending link, keeping the counters: used when a read can't be rewritten (a failed transfer,
+// no hold of our own on the buffer, a short write). Which link it belonged to can't be known without
+// reading it, and a dropped round only leaves bluetoothd on the timeout it already had.
+inline void abortLinks(DataLengthState &s) {
+    for (auto &l : s.links)
+        l = DataLengthLink{};
+    ++s.aborts;
+}
 inline bool dataLengthPending(const DataLengthState &s) {
     for (auto &l : s.links)
         if (l.outstanding)
@@ -177,9 +190,10 @@ inline unsigned extraRemoteReads(DataLengthState &s, const uint8_t *hci, size_t 
         return 0;
     const uint16_t op = uint16_t(hci[0] | hci[1] << 8);
     if (op == kOpReset) {
-        const uint32_t expired = s.expired;
+        const uint32_t expired = s.expired, aborts = s.aborts;
         s = DataLengthState{};
         s.expired = expired;
+        s.aborts = aborts;
         return 0;
     }
     if (op != kOpLeReadRemoteFeatures || length < 5 || hci[2] < 2)
@@ -201,7 +215,20 @@ inline unsigned extraRemoteReads(DataLengthState &s, const uint8_t *hci, size_t 
     l->stage = 0;
     l->outstanding = 2;
     l->armedNs = nowNs;
+    s.wrapped = 0;   // a new round starts with a full budget of wrapped reads
     return 2;
+}
+// Whether to wrap an interrupt read: something is waiting, the buffer can hold the longest rewritten
+// event (PR #61), and the round's budget isn't spent. A spent budget drops the round.
+inline bool wrapRead(DataLengthState &s, uint64_t nowNs, size_t bufferLength) {
+    if (!expireLinks(s, nowNs) || bufferLength < kDataLengthEventLength)
+        return false;
+    if (s.wrapped >= kMaxWrappedReads) {
+        abortLinks(s);
+        return false;
+    }
+    ++s.wrapped;
+    return true;
 }
 // A copy that couldn't be sent never produces an event, so it's not waited for.
 inline void forgetRemoteRead(DataLengthState &s, const uint8_t *hci, size_t length) {

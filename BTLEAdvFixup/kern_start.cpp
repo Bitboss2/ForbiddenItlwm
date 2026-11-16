@@ -59,7 +59,7 @@ static void *interruptPipe {};
 // Entries are per connection handle and expire after 2 s (audit BT03; this also bounds BT02's window).
 static BTLEAdv::DataLengthState lengthState {};
 static IOSimpleLock *lengthLock {};
-static uint32_t lengthRewrites {}, lengthFailures {}, lengthExpiredSeen {};
+static uint32_t lengthRewrites {}, lengthFailures {}, lengthExpiredSeen {}, lengthAbortsSeen {};
 static uint32_t bumpCounter(uint32_t &counter) { return __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED); }
 static uint64_t nowNanoseconds() {
     uint64_t now = 0;
@@ -145,9 +145,10 @@ static IOReturn patched_device_request(void *that, IOService *provider, Standard
             interruptPipe = nullptr;
             if (lengthLock) {
                 IOSimpleLockLock(lengthLock);
-                const uint32_t expired = lengthState.expired;
+                const uint32_t expired = lengthState.expired, aborts = lengthState.aborts;
                 lengthState = BTLEAdv::DataLengthState{};
                 lengthState.expired = expired;
+                lengthState.aborts = aborts;
                 IOSimpleLockUnlock(lengthLock);
             }
         }
@@ -248,36 +249,59 @@ struct DelayedCompletion {
     IOUSBHostCompletion wrapped;    // what the USB stack is given (audit BT01)
 };
 
+// Publishes a counter that changed, outside the spinlock (a registry write allocates).
+static void noteChanged(const char *key, uint32_t value, uint32_t &seen) {
+    if (value != __atomic_load_n(&seen, __ATOMIC_RELAXED)) {
+        __atomic_store_n(&seen, value, __ATOMIC_RELAXED);
+        noteHook(key, value);
+    }
+}
+
 static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uint32_t bytesTransferred) {
     auto *delayed = static_cast<DelayedCompletion *>(owner);
     IOMemoryDescriptor *buffer = delayed->buffer;
-    // Tahoe hands over the buffer the stack already prepared, so prepare() is refused there and
-    // the bytes are read directly, the way IntelBTPatcher does it. Only a hold this call took is
-    // released again: when prepare() is refused the hold belongs to the USB stack, and completing
-    // it here would release that one instead.
-    if (status == kIOReturnSuccess && buffer && bytesTransferred >= 6 &&
-        buffer->getLength() >= BTLEAdv::kDataLengthEventLength) {
-        const IOReturn prepared = buffer->prepare(kIODirectionInOut);
-        uint8_t event[32] = {};
-        const size_t size = min(size_t(bytesTransferred), sizeof(event));
-        buffer->readBytes(0, event, size);
-        IOSimpleLockLock(lengthLock);
-        const size_t rewritten = BTLEAdv::rewriteEvent(lengthState, event, size);
-        IOSimpleLockUnlock(lengthLock);
-        // writeBytes returns the number of bytes written, not an IOReturn. The shrunk size may only
-        // be claimed when every rewritten byte is really in the buffer: forwarding the original
-        // size leaves stale feature bytes behind, which the stack parses as garbage events and
-        // bluetoothd takes the parser desync as fatal (reason 607).
-        if (rewritten != size) {
-            if (buffer->writeBytes(0, event, rewritten) == rewritten) {
-                bytesTransferred = uint32_t(rewritten);
-                noteHook("BTLEAdvLengthRewrites", bumpCounter(lengthRewrites));
-            } else {
-                noteHook("BTLEAdvLengthFailures", bumpCounter(lengthFailures));
+    // readBytes() and writeBytes() need the descriptor wired, and only a hold this call took is known to
+    // be there: touching a buffer this call couldn't prepare panics with "IOGMD: not wired for the
+    // IODMACommand" (PR #61). Before, a refused prepare() was assumed to mean "already prepared on
+    // Tahoe", which was never tested; PR #61's Tahoe test shows prepare() succeeds. A hold taken here is
+    // also the only one released here.
+    const bool held = status == kIOReturnSuccess && buffer &&
+        buffer->getLength() >= BTLEAdv::kDataLengthEventLength &&
+        buffer->prepare(kIODirectionInOut) == kIOReturnSuccess;
+    bool abort = !held;
+    if (held) {
+        // Events shorter than 6 bytes can't be the one rewritten; they pass through untouched.
+        if (bytesTransferred >= 6) {
+            uint8_t event[32] = {};
+            const size_t size = min(size_t(bytesTransferred), sizeof(event));
+            buffer->readBytes(0, event, size);
+            IOSimpleLockLock(lengthLock);
+            const size_t rewritten = BTLEAdv::rewriteEvent(lengthState, event, size);
+            IOSimpleLockUnlock(lengthLock);
+            // writeBytes returns the number of bytes written, not an IOReturn. The shrunk size may only
+            // be claimed when every rewritten byte is really in the buffer: forwarding the original
+            // size leaves stale feature bytes behind, which the stack parses as garbage events and
+            // bluetoothd takes the parser desync as fatal (reason 607).
+            if (rewritten != size) {
+                if (buffer->writeBytes(0, event, rewritten) == rewritten) {
+                    bytesTransferred = uint32_t(rewritten);
+                    noteHook("BTLEAdvLengthRewrites", bumpCounter(lengthRewrites));
+                } else {
+                    noteHook("BTLEAdvLengthFailures", bumpCounter(lengthFailures));
+                    abort = true;   // a duplicate that can't be rewritten can't be waited for either
+                }
             }
         }
-        if (prepared == kIOReturnSuccess)
-            buffer->complete(kIODirectionInOut);
+        buffer->complete(kIODirectionInOut);
+    }
+    if (abort) {
+        // Nothing could be rewritten into this read (failed transfer, no hold of our own, short write):
+        // drop the pending round so no further read is wrapped for it (PR #61).
+        IOSimpleLockLock(lengthLock);
+        BTLEAdv::abortLinks(lengthState);
+        const uint32_t aborts = lengthState.aborts;
+        IOSimpleLockUnlock(lengthLock);
+        noteChanged("BTLEAdvLengthAborts", aborts, lengthAbortsSeen);
     }
     const IOUSBHostCompletion original = delayed->original;
     IOFree(delayed, sizeof(*delayed));
@@ -288,18 +312,18 @@ static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uin
 static IOReturn patched_pipe_io(void *that, IOMemoryDescriptor *dataBuffer, uint32_t bytesTransferred,
                                 IOUSBHostCompletion *completion, uint32_t completionTimeoutMs) {
     bool wrap = false;
-    uint32_t expired = 0;
     if (completion && dataBuffer && lengthLock && that == interruptPipe) {
         const uint64_t now = nowNanoseconds();
+        const size_t bufferLength = dataBuffer->getLength();
         IOSimpleLockLock(lengthLock);
-        wrap = BTLEAdv::expireLinks(lengthState, now);
-        expired = lengthState.expired;
+        // Only while a link waits, for a buffer that can hold the rewritten event, and at most
+        // kMaxWrappedReads per round (PR #61). Entries expire after 2 s (audit BT03).
+        wrap = BTLEAdv::wrapRead(lengthState, now, bufferLength);
+        const uint32_t expired = lengthState.expired, aborts = lengthState.aborts;
         IOSimpleLockUnlock(lengthLock);
-        // Its own counter: BTLEAdvLengthFailures counts copies that couldn't be sent or written back.
-        if (expired != __atomic_load_n(&lengthExpiredSeen, __ATOMIC_RELAXED)) {
-            __atomic_store_n(&lengthExpiredSeen, expired, __ATOMIC_RELAXED);
-            noteHook("BTLEAdvLengthExpired", expired);
-        }
+        // Their own counters: BTLEAdvLengthFailures counts copies that couldn't be sent or written back.
+        noteChanged("BTLEAdvLengthExpired", expired, lengthExpiredSeen);
+        noteChanged("BTLEAdvLengthAborts", aborts, lengthAbortsSeen);
     }
     if (wrap) {
         auto *delayed = static_cast<DelayedCompletion *>(IOMalloc(sizeof(DelayedCompletion)));
