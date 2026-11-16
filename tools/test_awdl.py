@@ -31,6 +31,8 @@ with tempfile.TemporaryDirectory(prefix="forbiddenitlwm-tests-") as directory:
 subprocess.run(["python3", str(root / "tests/monitor_tx_ownership.py")], check=True)
 subprocess.run(["python3", str(root / "tests/monitor_channel.py")], check=True)
 subprocess.run(["python3", str(root / "tests/monitor_probe.py")], check=True)
+# AWDL recovery across Wi-Fi reassociation: extracted production methods under ASan/UBSan (PR #12).
+subprocess.run(["python3", str(root / "tests/awdl_reconnect_recovery.py")], check=True)
 # The pattern set for the bluetoothd installed here (PR #1); 26.7.1's set elsewhere.
 build = subprocess.check_output(["sw_vers", "-buildVersion"], text=True).strip()
 pattern_set = {"25G241": "2671", "25G332": "2672", "25G342": "2673"}.get(build, "2671")
