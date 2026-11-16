@@ -172,6 +172,36 @@ IOReturn AirportItlwmSkywalkInterface::wclCommand(OSObject *, void *a0, void *a1
         return kIOReturnNotReady;
     switch (uintptr_t(a1)) {
         case 13: return self->copyWCLChannels(a2);
+        case 16: {  // getWCL_VALID_CHANNEL_COUNT, under the gate (audit ST04)
+            auto *count = static_cast<unsigned long *>(a2);
+            *count = 0;
+            ieee80211com *ic = self->fHalService->get80211Controller();
+            for (unsigned i = 1; i <= IEEE80211_CHAN_MAX; ++i)
+                if (isset(ic->ic_chan_active, i) && ic->ic_channels[i].ic_freq)
+                    ++*count;
+            return kIOReturnSuccess;
+        }
+        case 17: {  // getWCL_CHANNELS_INFO, under the gate (audit ST04)
+            auto info = static_cast<AirportWCL::ChannelInfo *>(a2);
+            bzero(info, sizeof(*info));
+            ieee80211com *ic = self->fHalService->get80211Controller();
+            for (unsigned i = 1; i <= IEEE80211_CHAN_MAX && info->count < 400; ++i) {
+                const ieee80211_channel *channel = &ic->ic_channels[i];
+                if (!isset(ic->ic_chan_active, i) || !channel->ic_freq)
+                    continue;
+                auto &entry = info->channels[info->count++];
+                entry.channel = i;
+                entry.channelSpec = uint16_t(i | (IEEE80211_IS_CHAN_5GHZ(channel) ? 0xd000 : 0x1000));
+                if (channel->ic_flags & IEEE80211_CHAN_DFS)
+                    entry.flags |= 2;
+                if (channel->ic_flags & IEEE80211_CHAN_PASSIVE)
+                    entry.flags |= 4;
+            }
+            apple80211_country_code_data country = {};
+            if (self->instance->getCOUNTRY_CODE(static_cast<OSObject *>(self), &country) == kIOReturnSuccess)
+                memcpy(info->country, country.cc, 3);
+            return info->count ? kIOReturnSuccess : kIOReturnNotReady;
+        }
         case 14: return self->copyWCLTrafficCounters(a2);
         case 15:
             return self->fHalService->setScanHomeAwayTime(
@@ -932,11 +962,10 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_VALID_CHANNEL_COUNT(unsigned long 
     if (!count)
         return kIOReturnBadArgument;
     *count = 0;
-    ieee80211com *ic = fHalService->get80211Controller();
-    for (unsigned i = 1; i < IEEE80211_CHAN_MAX; ++i)
-        if (isset(ic->ic_chan_active, i))
-            ++*count;
-    return kIOReturnSuccess;
+    if (!_fCommandGate)
+        return kIOReturnNotReady;
+    // Read under the command gate with the stop check, like its siblings (audit ST04).
+    return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(16), count);
 }
 
 IOReturn AirportItlwmSkywalkInterface::setWCL_LINK_STATE_UPDATE(apple80211_wcl_update_link_state *data)
@@ -1050,25 +1079,10 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_CHANNELS_INFO(apple80211ChannelInf
 {
     if (!data)
         return kIOReturnBadArgument;
-    auto info = reinterpret_cast<AirportWCL::ChannelInfo *>(data);
-    bzero(info, sizeof(*info));
-    ieee80211com *ic = fHalService->get80211Controller();
-    for (unsigned i = 1; i < IEEE80211_CHAN_MAX && info->count < 400; ++i) {
-        if (!isset(ic->ic_chan_active, i))
-            continue;
-        const ieee80211_channel *channel = &ic->ic_channels[i];
-        auto &entry = info->channels[info->count++];
-        entry.channel = i;
-        entry.channelSpec = uint16_t(i | (IEEE80211_IS_CHAN_5GHZ(channel) ? 0xd000 : 0x1000));
-        if (channel->ic_flags & IEEE80211_CHAN_DFS)
-            entry.flags |= 2;
-        if (channel->ic_flags & IEEE80211_CHAN_PASSIVE)
-            entry.flags |= 4;
-    }
-    apple80211_country_code_data country = {};
-    if (instance->getCOUNTRY_CODE(static_cast<OSObject *>(this), &country) == kIOReturnSuccess)
-        memcpy(info->country, country.cc, 3);
-    return info->count ? kIOReturnSuccess : kIOReturnNotReady;
+    if (!_fCommandGate)
+        return kIOReturnNotReady;
+    // Read under the command gate with the stop check, like its siblings (audit ST04).
+    return _fCommandGate->runAction(wclCommand, this, reinterpret_cast<void *>(17), data);
 }
 
 IOReturn AirportItlwmSkywalkInterface::getCHANNELS_INFO(apple80211_channels_info *data)

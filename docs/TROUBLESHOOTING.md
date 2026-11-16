@@ -35,7 +35,7 @@ The firmware opens channel 149 only after a nearby network tells it the country.
 - Make sure some 5 GHz network that advertises a country is in range. Switching on an iPhone's Personal Hotspot nearby, without joining it, has worked.
 - Wait a minute after it appears.
 - Some countries don't allow channels 149 to 161, or allow them only at 20 or 40 MHz. Up to 0.5.4 AirDrop stayed on channel 6 there; from 0.6.0 it uses 44 if the iPhone does and the firmware allows it. The checker warns about known ones.
-- **Channels 149 to 161 marked passive** (China, for example): from 0.5.0, once the hackintosh hears a Wi-Fi network's beacon on one of these channels, the listener may use it, as on Linux. `ITLAWDLCoexBeaconHints` shows which channels were heard (bits 0 to 3 = 149, 153, 157, 161). A router on 149 at 80 MHz covers all four. The same applies to 36 to 48 for channel 44 (bits 8 to 11). From 0.6.0 such a channel can also be used while the Mac's own Wi-Fi is connected on a channel in the same group (36–48, 52–64, 100–144 or 149–165), if the firmware marks it for that, as Linux does: `ITLAWDLCoexIrConcurrent` lists the channels, `ITLAWDLCoexIrConcurrentUsed` counts the uses. With neither, AirDrop stays on 6.
+- **Channels 149 to 161 marked passive** (China, for example): from 0.5.0, once the hackintosh hears a Wi-Fi network's beacon on one of these channels, the listener may use it (Linux does this only before the country is known; here it also counts after, see HOW-IT-WORKS). `ITLAWDLCoexBeaconHints` shows which channels were heard (bits 0 to 3 = 149, 153, 157, 161). A router on 149 at 80 MHz covers all four. The same applies to 36 to 48 for channel 44 (bits 8 to 11). From 0.6.0 such a channel can also be used while the Mac's own Wi-Fi is connected on a channel in the same group (36–48, 52–64, 100–144 or 149–165), if the firmware marks it for that (Linux's rule for Wi-Fi Direct interfaces): `ITLAWDLCoexIrConcurrent` lists the channels, `ITLAWDLCoexIrConcurrentUsed` counts the uses. With neither, AirDrop stays on 6.
 - The driver never overrides the country's rules, and `itlwm_cc` doesn't help.
 
 ## The iPhone doesn't list the Mac
@@ -63,13 +63,15 @@ This is the main known problem. The time goes into the iPhone finding the Mac's 
 
 - **Check the iPhone's Wi-Fi first.** AirDrop gets the share of the iPhone's radio time that its own Wi-Fi leaves over. If the iPhone isn't on Wi-Fi, or is on channel 149, it gets 15 of 16 slots (about 22 MB/s). On a quiet network on another channel it gets 11 (about 15 MB/s), on a busy one 7 (about 6 MB/s). `ITLAWDLCoexPeerPresentEntries` shows the current number.
 - **Check the channel:** on 6, everything is very slow. The listener can drop to 6 for a while when the firmware briefly loses the country (`ITLAWDLCoexCountryLearned` No).
-- **Mac → iPhone much slower than iPhone → Mac:** on some setups (#22, #24) the iPhone never accepted block ack (`ITLAWDLCoexBaTxStateName` stays `asking`), so every frame went out singly. It happened when the Mac's own Wi-Fi was on the same channel as the AirDrop listener. From 0.6.0 the fix from [PR #47](https://github.com/retropineaple/ForbiddenItlwm/pull/47) is on by default (`ITLAWDLCoexSameChannelProbe*` keys). If it's still slow, please report it with the measure output. **Workaround:** put your router (or the Mac's network) on another channel, such as 36–48 or 157.
+- **Mac → iPhone much slower than iPhone → Mac:** on some setups (#22, #24) the iPhone never accepted block ack (`ITLAWDLCoexBaTxStateName` stays `asking`), so every frame went out singly. It happened when the Mac's own Wi-Fi was on the same channel as the AirDrop listener. From 0.6.0 the fix from [PR #47](https://github.com/retropineaple/ForbiddenItlwm/pull/47) is on by default (`ITLAWDLCoexSameChannelProbe*` keys). If it's still slow, please report it with the measure output. **Workaround:** put your router (or the Mac's network) on another channel, such as 36–48, or 100 and up where allowed. Not 153–161: at 80 MHz they share the listener's block on 149 (#26).
 - **Measure it:** `bash tools/compat/airdrop_measure.sh` prints the speed and connect times macOS logs for each transfer.
 - **The very first send after boot** is often slower while rate control settles.
 
 ## Networks are missing from the Wi-Fi list
 
-From 0.6.0 the driver counts what happens to macOS's scan requests (#20, #24, #45). After the list has looked wrong for a while, run `ioreg -l -w0 | grep -E '"ItlwmScan(Stats|Last)"'` and post the output with your report. It holds counts only, no network names.
+**Check for OpenCore Legacy Patcher root patches first,** not only the Wi-Fi ones: on one machine OCLP's audio patch alone left the list empty, with every scan failing, until OCLP's patches were removed (#20).
+
+From 0.6.0 the driver counts what happens to macOS's scan requests (#20, #24, #45). After the list has looked wrong for a while, run `ioreg -l -w0 | grep -E '"ItlwmScan(Stats|StatsSTA|Last)"'` and post the output with your report. It holds counts only, no network names. On Sonoma, `ItlwmScanStats` exists from 0.6.0-beta.1 (0.6.0-alpha.1 had no counters there).
 
 ## A new Bluetooth LE mouse or keyboard won't pair
 

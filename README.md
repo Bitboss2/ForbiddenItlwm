@@ -59,7 +59,7 @@ Read-only: it changes nothing and sends nothing anywhere. More in [tools/compat]
 - **The card has to learn your country first,** from a nearby Wi-Fi network that advertises it (most routers do; an iPhone's Personal Hotspot switched on nearby also works). Until then it falls back to channel 6.
 - **From 0.6.0-alpha.1 the listener follows your iPhone** onto 44 when the iPhone uses 44 ([#17](https://github.com/retropineaple/ForbiddenItlwm/issues/17), [PR #21](https://github.com/retropineaple/ForbiddenItlwm/pull/21)). Up to 0.5.4 it stayed on 149 or fell back to channel 6, which works but is slow.
 - **Some countries allow neither** (Turkey, Egypt and Saudi Arabia have no 149, for example), or only at 20 or 40 MHz. AirDrop then uses channel 6.
-- **Where the card marks a channel passive** (China's 149, Japan's 44), AirDrop uses it once it has heard a Wi-Fi network there, as Linux does, or from 0.6.0 while your Mac's own Wi-Fi is connected nearby in the same channel group.
+- **Where the card marks a channel passive** (China's 149, Japan's 44), AirDrop uses it once it has heard a Wi-Fi network there, or from 0.6.0 while your Mac's own Wi-Fi is connected nearby in the same channel group.
 
 The checker shows your country and whether channels 149 and 44 are open; [TROUBLESHOOTING](docs/TROUBLESHOOTING.md#the-listener-is-on-channel-6-or-countrylearned-is-no) explains the rest.
 
@@ -80,12 +80,16 @@ Boot from the USB stick, join your Wi-Fi network, wait a minute, then check:
 
 Please report what you find, working or not, in a [GitHub issue](https://github.com/retropineaple/ForbiddenItlwm/issues), with your card, macOS build and the checker's output.
 
+**Security problems** (anything that could let a nearby device or another program crash the Mac or read memory): please don't open a public issue. See [SECURITY.md](SECURITY.md).
+
 ## Known limitations
 
 - **Mac → iPhone can be much slower than iPhone → Mac** on some setups ([#22](https://github.com/retropineaple/ForbiddenItlwm/issues/22), [#24](https://github.com/retropineaple/ForbiddenItlwm/issues/24)). Under investigation.
 - **Connects can be slow,** mostly iPhone → Mac.
 - **Normal Wi-Fi loses some speed while AirDrop's listener runs** (they share the radio).
 - **A long list of boot flags,** sleep untested, iPhone only (iPads and Macs not tried).
+- **WPA3:** on a WPA2/WPA3 transition network the Mac joins with WPA2 and without protected management frames, as AirportItlwm does. WPA3-only networks can't be joined.
+- **The Sonoma kext's Wi-Fi code** takes paths of its own (join, scan, keys, teardown) that the Tahoe and Sequoia kexts don't use. They had their first security review for 0.6.0; it hasn't been tested on hardware yet.
 
 What's planned: [ROADMAP](docs/ROADMAP.md).
 

@@ -417,6 +417,8 @@ inline size_t selectWPA2TransitionMode(uint8_t *ies, size_t length) {
     if (converted) {
         for (size_t offset = 0; offset + 2 <= length; ) {
             const size_t size = size_t(ies[offset + 1]) + 2;
+            if (size > length - offset)     // never past the list, whatever ran before (audit P-W01)
+                break;
             if (ies[offset] == 244) {
                 memmove(ies + offset, ies + offset + size, length - offset - size);
                 length -= size;

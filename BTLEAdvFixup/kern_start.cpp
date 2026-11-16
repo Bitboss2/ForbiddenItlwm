@@ -11,6 +11,8 @@
 #include <Headers/plugin_start.hpp>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/usb/IOUSBHostDevice.h>
+#include <kern/clock.h>
+#include <mach/mach_time.h>
 #include "BTLEAdvPatches.hpp"
 #include "BTLEAdvHci.hpp"
 
@@ -51,10 +53,22 @@ static mach_vm_address_t orig_pipe_io {};
 static mach_vm_address_t orig_init_pipe {};
 static mach_vm_address_t orig_init_pipe_config {};
 static void *interruptPipe {};
-// Written when a command goes out, read when its completion arrives on the USB workloop, so no
-// lock: a missed rewrite only leaves bluetoothd on a timeout it already had.
+// Written when a command goes out (any thread) and read when an interrupt read is submitted or completes
+// (the USB workloop). lengthLock is a spinlock held only around the table itself: never across a USB
+// call, an allocation or a registry write. Taken after hciLock when both are needed, never before.
+// Entries are per connection handle and expire after 2 s (audit BT03; this also bounds BT02's window).
 static BTLEAdv::DataLengthState lengthState {};
-static uint32_t lengthRewrites {}, lengthFailures {};
+static IOSimpleLock *lengthLock {};
+static uint32_t lengthRewrites {}, lengthFailures {}, lengthExpiredSeen {};
+static uint32_t bumpCounter(uint32_t &counter) { return __atomic_add_fetch(&counter, 1, __ATOMIC_RELAXED); }
+static uint64_t nowNanoseconds() {
+    uint64_t now = 0;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &now);
+    return now;
+}
+// Asynchronous originals the added commands were sent beside (audit P-R06), so testers' reports show
+// whether that case happens before anything is changed for it.
+static uint32_t asyncSeen {};
 
 static IOReturn patched_device_request(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
                                        IOMemoryDescriptor *descriptor, unsigned int &length,
@@ -126,19 +140,38 @@ static IOReturn patched_device_request(void *that, IOService *provider, Standard
         if (hciOwner != that) {
             hciState = BTLEAdv::State{};
             hciOwner = that;
+            // A different controller object (re-enumerated, or a second one): the remembered pipe and any
+            // pending duplicates belonged to the old one (audit BT02).
+            interruptPipe = nullptr;
+            if (lengthLock) {
+                IOSimpleLockLock(lengthLock);
+                const uint32_t expired = lengthState.expired;
+                lengthState = BTLEAdv::DataLengthState{};
+                lengthState.expired = expired;
+                IOSimpleLockUnlock(lengthLock);
+            }
         }
         legacyScanAddress = BTLEAdv::wantsLegacyScanAddress(hciState, hci, hciLength);
         action = BTLEAdv::onCommand(hciState, hci, hciLength, patchScanning);
         IOLockUnlock(hciLock);
-        remoteReads = BTLEAdv::extraRemoteReads(lengthState, hci, hciLength);
+        if (lengthLock) {
+            const uint64_t now = nowNanoseconds();
+            IOSimpleLockLock(lengthLock);
+            remoteReads = BTLEAdv::extraRemoteReads(lengthState, hci, hciLength, now);
+            IOSimpleLockUnlock(lengthLock);
+        }
     }
+    if (completion && (remoteReads || legacyScanAddress || action.sendSetAddress || action.sendEventMask))
+        noteHook("BTLEAdvAsyncSeen", bumpCounter(asyncSeen));
     for (unsigned i = 0; i < remoteReads; ++i) {
         // Sent before the real command, as IntelBTPatcher does: the three completions carry the
         // same features, so the first one reaches bluetoothd unchanged and the other two are
         // rewritten into the events it's missing.
         if (sendExtra(that, provider, request, hci, hciLength, timeout) != kIOReturnSuccess) {
-            BTLEAdv::forgetRemoteRead(lengthState);
-            noteHook("BTLEAdvLengthFailures", ++lengthFailures);
+            IOSimpleLockLock(lengthLock);
+            BTLEAdv::forgetRemoteRead(lengthState, hci, hciLength);
+            IOSimpleLockUnlock(lengthLock);
+            noteHook("BTLEAdvLengthFailures", bumpCounter(lengthFailures));
         }
     }
     if (legacyScanAddress) {
@@ -212,6 +245,7 @@ static int patched_init_pipe_config(void *that, StandardUSB::EndpointDescriptor 
 struct DelayedCompletion {
     IOUSBHostCompletion original;
     IOMemoryDescriptor *buffer;
+    IOUSBHostCompletion wrapped;    // what the USB stack is given (audit BT01)
 };
 
 static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uint32_t bytesTransferred) {
@@ -227,7 +261,9 @@ static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uin
         uint8_t event[32] = {};
         const size_t size = min(size_t(bytesTransferred), sizeof(event));
         buffer->readBytes(0, event, size);
+        IOSimpleLockLock(lengthLock);
         const size_t rewritten = BTLEAdv::rewriteEvent(lengthState, event, size);
+        IOSimpleLockUnlock(lengthLock);
         // writeBytes returns the number of bytes written, not an IOReturn. The shrunk size may only
         // be claimed when every rewritten byte is really in the buffer: forwarding the original
         // size leaves stale feature bytes behind, which the stack parses as garbage events and
@@ -235,9 +271,9 @@ static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uin
         if (rewritten != size) {
             if (buffer->writeBytes(0, event, rewritten) == rewritten) {
                 bytesTransferred = uint32_t(rewritten);
-                noteHook("BTLEAdvLengthRewrites", ++lengthRewrites);
+                noteHook("BTLEAdvLengthRewrites", bumpCounter(lengthRewrites));
             } else {
-                noteHook("BTLEAdvLengthFailures", ++lengthFailures);
+                noteHook("BTLEAdvLengthFailures", bumpCounter(lengthFailures));
             }
         }
         if (prepared == kIOReturnSuccess)
@@ -251,13 +287,39 @@ static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uin
 
 static IOReturn patched_pipe_io(void *that, IOMemoryDescriptor *dataBuffer, uint32_t bytesTransferred,
                                 IOUSBHostCompletion *completion, uint32_t completionTimeoutMs) {
-    if (completion && dataBuffer && that == interruptPipe && lengthState.outstanding) {
+    bool wrap = false;
+    uint32_t expired = 0;
+    if (completion && dataBuffer && lengthLock && that == interruptPipe) {
+        const uint64_t now = nowNanoseconds();
+        IOSimpleLockLock(lengthLock);
+        wrap = BTLEAdv::expireLinks(lengthState, now);
+        expired = lengthState.expired;
+        IOSimpleLockUnlock(lengthLock);
+        // Its own counter: BTLEAdvLengthFailures counts copies that couldn't be sent or written back.
+        if (expired != __atomic_load_n(&lengthExpiredSeen, __ATOMIC_RELAXED)) {
+            __atomic_store_n(&lengthExpiredSeen, expired, __ATOMIC_RELAXED);
+            noteHook("BTLEAdvLengthExpired", expired);
+        }
+    }
+    if (wrap) {
         auto *delayed = static_cast<DelayedCompletion *>(IOMalloc(sizeof(DelayedCompletion)));
         if (delayed) {
+            // The caller's completion is never modified: ours is a copy held in the same allocation, so
+            // a caller that reuses its structure can't send a read pointing at a freed wrapper, and a
+            // failed submit leaves the caller's structure as it was (audit BT01).
             delayed->original = *completion;
             delayed->buffer = dataBuffer;
-            completion->action = rewriteCompletion;
-            completion->owner = delayed;
+            delayed->wrapped = *completion;
+            delayed->wrapped.action = rewriteCompletion;
+            delayed->wrapped.owner = delayed;
+            const IOReturn result = FunctionCast(patched_pipe_io, orig_pipe_io)(that, dataBuffer, bytesTransferred,
+                                                                                &delayed->wrapped, completionTimeoutMs);
+            // A refused submit never calls the completion, so nothing else would free this. That is the
+            // documented contract: IOUSBHostIOSource::io (which IOUSBHostPipe::io refers to) returns
+            // "kIOReturnSuccess if the completion will be called in the future, otherwise error" (audit V-2).
+            if (result != kIOReturnSuccess)
+                IOFree(delayed, sizeof(*delayed));
+            return result;
         }
     }
     return FunctionCast(patched_pipe_io, orig_pipe_io)(that, dataBuffer, bytesTransferred, completion, completionTimeoutMs);
@@ -301,6 +363,9 @@ PluginConfiguration ADDPR(config) {
                 SYSLOG("btleadv", "failed to route cs validation");
         });
         hciLock = IOLockAlloc();
+        lengthLock = IOSimpleLockAlloc();
+        if (!lengthLock)
+            SYSLOG("btleadv", "no lock for the data length fix, it stays off");
         lilu.onKextLoadForce(&usbHostInfo, 1, [](void *, KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
             if (index != usbHostInfo.loadIndex || !hciLock)
                 return;
@@ -347,7 +412,7 @@ extern kern_return_t _start(kmod_info_t *, void *);
 extern kern_return_t _stop(kmod_info_t *, void *);
 extern kern_return_t BTLEAdvFixup_kern_start(kmod_info_t *, void *);
 extern kern_return_t BTLEAdvFixup_kern_stop(kmod_info_t *, void *);
-__attribute__((visibility("default"))) KMOD_EXPLICIT_DECL(org.forbiddenitlwm.BTLEAdvFixup, "0.9.1", _start, _stop)
+__attribute__((visibility("default"))) KMOD_EXPLICIT_DECL(org.forbiddenitlwm.BTLEAdvFixup, xStringify(MODULE_VERSION), _start, _stop)
 __attribute__((visibility("hidden"))) kmod_start_func_t *_realmain = BTLEAdvFixup_kern_start;
 __attribute__((visibility("hidden"))) kmod_stop_func_t *_antimain = BTLEAdvFixup_kern_stop;
 __attribute__((visibility("hidden"))) int _kext_apple_cc = __APPLE_CC__;

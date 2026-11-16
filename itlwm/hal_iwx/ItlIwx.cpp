@@ -256,8 +256,7 @@ bool ItlIwx::attach(IOPCIDevice *device)
     pci.pa_dmat = dmaArena;
 #endif
     if (!iwx_attach(&com, &pci)) {
-        detach(device);
-        releaseAll();
+        detach(device);     // detach ends with releaseAll() (audit HL04: it ran twice)
         return false;
     }
     return true;
@@ -266,36 +265,53 @@ bool ItlIwx::attach(IOPCIDevice *device)
 void ItlIwx::
 detach(IOPCIDevice *device)
 {
-    // The AWDL timers and their tasks are global and take the softc: stop them before anything goes.
-    awdlStopTimers();
-#ifdef AIRPORT_VTD
-    getMainCommandGate()->runAction(
-        [](OSObject *, void *arg0, void *arg1, void *, void *) -> IOReturn {
-            auto that = static_cast<ItlIwx *>(arg0);
-            auto pci = static_cast<IOPCIDevice *>(arg1);
-            that->dmaDetaching = true;
-            that->dmaEpoch++;
-            that->com.sc_ic.ic_ac.ac_if.if_flags &= ~(IFF_UP | IFF_RUNNING);
-            that->com.sc_ic.ic_state = IEEE80211_S_INIT;
-            timeout_del(&that->com.sc_ic.ic_bgscan_timeout);
-            that->com.sc_flags |= IWX_FLAG_SHUTDOWN;
-            that->com.sc_generation++;
+    // The AWDL timers and their tasks are global and take the softc: stop them before anything goes. The
+    // flag and all three frees run as one gated action, so no gated task sees the flag clear and then a
+    // freed timer (audit P-H02; each timer call was already gated and a freed timer can't be re-armed).
+    //
+    // Then quiesce, in every build, before any ring or DMA memory is freed: no interrupt, task or transmit
+    // may touch them afterwards. This used to be VT-d only, so the Sonoma kext (built without AIRPORT_VTD)
+    // freed the rings with the interrupt source and both task queues still live (audit HL01).
+    //
+    // The gate is looked up once. Without one (a start that failed before the HAL was given its
+    // controller) both steps run directly: nothing else can be running on the device then (audit F02).
+    auto stopTimers = [](OSObject *, void *, void *, void *, void *) -> IOReturn {
+        awdlStopTimers();
+        return kIOReturnSuccess;
+    };
+    auto quiesce = [](OSObject *, void *arg0, void *arg1, void *, void *) -> IOReturn {
+        auto that = static_cast<ItlIwx *>(arg0);
+        auto pci = static_cast<IOPCIDevice *>(arg1);
+        that->dmaDetaching = true;
+        that->dmaEpoch++;
+        that->com.sc_ic.ic_ac.ac_if.if_flags &= ~(IFF_UP | IFF_RUNNING);
+        that->com.sc_ic.ic_state = IEEE80211_S_INIT;
+        timeout_del(&that->com.sc_ic.ic_bgscan_timeout);
+        that->com.sc_flags |= IWX_FLAG_SHUTDOWN;
+        that->com.sc_generation++;
+        if (pci)
             pci->setBusMasterEnable(false);
-            auto intr = that->com.ih;
-            if (intr && intr->intr)
-                intr->intr->disable();
-            for (unsigned int i = 0; i < nitems(that->com.txq); i++)
-                that->iwx_reset_tx_ring(&that->com, &that->com.txq[i]);
-            return kIOReturnSuccess;
-        }, this, device);
-#endif
+        auto intr = that->com.ih;
+        if (intr && intr->intr)
+            intr->intr->disable();
+        for (unsigned int i = 0; i < nitems(that->com.txq); i++)
+            that->iwx_reset_tx_ring(&that->com, &that->com.txq[i]);
+        return kIOReturnSuccess;
+    };
+    IOCommandGate *gate = getMainCommandGate();
+    if (gate) {
+        gate->runAction(stopTimers);
+        gate->runAction(quiesce, this, device);
+    } else {
+        stopTimers(nullptr, nullptr, nullptr, nullptr, nullptr);
+        quiesce(nullptr, this, device, nullptr, nullptr);
+    }
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
     struct iwx_softc *sc = &com;
-#ifdef AIRPORT_VTD
+    // Interrupt source and task queues go before the rings, in every build (audit HL01).
     releaseAll();
     taskq_destroy(systq);
     taskq_destroy(com.sc_nswq);
-#endif
     
     for (int txq_i = 0; txq_i < nitems(sc->txq); txq_i++)
         iwx_free_tx_ring(sc, &sc->txq[txq_i]);
@@ -314,10 +330,6 @@ detach(IOPCIDevice *device)
         sc->sc_dmat->reclaim();
 #endif
     ieee80211_ifdetach(ifp);
-#ifndef AIRPORT_VTD
-    taskq_destroy(systq);
-    taskq_destroy(com.sc_nswq);
-#endif
     releaseAll();
 }
 
@@ -10619,6 +10631,10 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     }
 }
 
+// Whether a notification's payload holds a whole T. The fixed-size notifications in iwx_rx_bmiss and iwx_rx_pkt were read without
+// checking, so a short record made the driver read past it or into the next one (audit HL05).
+#define IWX_NOTIF_FITS(pkt, T) (iwx_rx_packet_payload_len(pkt) >= sizeof(T))
+
 void ItlIwx::
 iwx_rx_bmiss(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
              struct iwx_rx_data *data)
@@ -10627,6 +10643,8 @@ iwx_rx_bmiss(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     struct iwx_missed_beacons_notif *mbn = (struct iwx_missed_beacons_notif *)pkt->data;
     uint32_t missed;
     
+    if (!IWX_NOTIF_FITS(pkt, struct iwx_missed_beacons_notif))     // audit HL05
+        return;
     if ((ic->ic_opmode != IEEE80211_M_STA) ||
         (ic->ic_state != IEEE80211_S_RUN))
         return;
@@ -11003,10 +11021,8 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     AbsoluteTime deadline;
 
     hcmd->resp_pkt = NULL;
-#ifdef AIRPORT_VTD
-    if (dmaDetaching)
+    if (dmaDetaching)       // every build (audit HL01)
         return ENXIO;
-#endif
     if ((sc->sc_flags & (IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR)) ||
         ring->ring_count == 0)
         return ENXIO;
@@ -12081,12 +12097,11 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac, int mo
         }
     }
 
-#ifdef AIRPORT_VTD
+    // In every build (audit HL01 / S02): a queue number outside the ring array, or a send during detach.
     if (dmaDetaching || qid < 0 || qid >= nitems(sc->txq)) {
         mbuf_freem(m);
         return ENXIO;
     }
-#endif
     ring = &sc->txq[qid];
     if (ring->ring_count == 0) {
         mbuf_freem(m);
@@ -18333,7 +18348,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                         sc->sc_uc.uc_ok = 1;
                     else
                         sc->sc_uc.uc_ok = 0;
-                } else {
+                } else if (IWX_NOTIF_FITS(pkt, struct iwx_alive_resp_v5)) {
                     SYNC_RESP_STRUCT(resp5, pkt, struct iwx_alive_resp_v5 *);
                     sc->sc_uc.uc_lmac_error_event_table[0] = le32toh(
                                                                      resp5->lmac_data[0].dbg_ptrs.error_event_table_ptr);
@@ -18356,6 +18371,9 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                                  sc->sku_id[0],
                                  sc->sku_id[1],
                                  sc->sku_id[2]);
+                } else {
+                    // Neither known size: report a failed start instead of reading past the record.
+                    sc->sc_uc.uc_ok = 0;
                 }
                 
                 sc->sc_uc.uc_intr = 1;
@@ -18393,7 +18411,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_ct_kill_notif *);
                 XYLog("%s: device at critical temperature (%u degC), "
                        "stopping device\n",
-                       DEVNAME(sc), le16toh(notif->temperature));
+                       DEVNAME(sc), IWX_NOTIF_FITS(pkt, struct iwx_ct_kill_notif) ? le16toh(notif->temperature) : 0);
                 sc->sc_flags |= IWX_FLAG_HW_ERR;
                 task_add(systq, &sc->init_task);
                 break;
@@ -18458,7 +18476,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 getMainCommandGate()->commandWakeup(&sc->sc_init_complete);
                 struct iwl_pnvm_init_complete_ntfy *pnvm_ntf;
                 SYNC_RESP_STRUCT(pnvm_ntf, pkt, struct iwl_pnvm_init_complete_ntfy *);
-                XYLog("PNVM complete notification received with status 0x%0x\n", le32toh(pnvm_ntf->status));
+                if (IWX_NOTIF_FITS(pkt, struct iwl_pnvm_init_complete_ntfy))
+                    XYLog("PNVM complete notification received with status 0x%0x\n", le32toh(pnvm_ntf->status));
                 break;
                 
             case IWX_INIT_COMPLETE_NOTIF:
@@ -18492,6 +18511,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 
             case IWX_MCC_CHUB_UPDATE_CMD: {
                 struct iwx_mcc_chub_notif *notif;
+                if (!IWX_NOTIF_FITS(pkt, struct iwx_mcc_chub_notif))
+                    break;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_mcc_chub_notif *);
                 iwx_mcc_update(sc, notif);
                 break;
@@ -18499,6 +18520,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 
             case IWX_REPLY_ERROR: {
                 struct iwx_error_resp *resp;
+                if (!IWX_NOTIF_FITS(pkt, struct iwx_error_resp))
+                    break;
                 SYNC_RESP_STRUCT(resp, pkt, struct iwx_error_resp *);
                 XYLog("%s: firmware error 0x%x, cmd 0x%x\n",
                       DEVNAME(sc), le32toh(resp->error_type),
@@ -18509,6 +18532,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_TIME_EVENT_NOTIFICATION: {
                 struct iwx_time_event_notif *notif;
                 uint32_t action;
+                if (!IWX_NOTIF_FITS(pkt, struct iwx_time_event_notif))
+                    break;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_time_event_notif *);
                 
                 if (sc->sc_time_event_uid != le32toh(notif->unique_id))
@@ -18568,6 +18593,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 
             case IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_NOTIF): {
                 struct iwx_session_prot_notif *notif;
+                if (!IWX_NOTIF_FITS(pkt, struct iwx_session_prot_notif))
+                    break;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_session_prot_notif *);
                 if (!notif->status) {
                     XYLog("Session protection failure\n");
@@ -18587,6 +18614,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             
             case IWX_WIDE_ID(IWX_LEGACY_GROUP, IWX_BAR_FRAME_RELEASE): {
                 struct iwx_bar_frame_release *release;
+                if (!IWX_NOTIF_FITS(pkt, struct iwx_bar_frame_release))     // before any field is read
+                    break;
                 SYNC_RESP_STRUCT(release, pkt, struct iwx_bar_frame_release *);
                 unsigned int baid = le32_get_bits(release->ba_info,
                                   IWX_BAR_FRAME_RELEASE_BAID_MASK);
