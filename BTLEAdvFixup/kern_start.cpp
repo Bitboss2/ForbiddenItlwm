@@ -55,6 +55,13 @@ static void *interruptPipe {};
 // lock: a missed rewrite only leaves bluetoothd on a timeout it already had.
 static BTLEAdv::DataLengthState lengthState {};
 static uint32_t lengthRewrites {}, lengthFailures {};
+// A round only leaves the "waiting for the duplicates" window when rewriteEvent() or one of the
+// drops below clears it. A round that never matches would otherwise keep wrapping every
+// interrupt-pipe completion forever, and the constant re-reading rewrites of the controller's
+// event pipe is what starves it. The cap is the hard stop for a round that still doesn't clear.
+static constexpr uint32_t kMaxWrappedReads = 24;
+static uint32_t wrappedReads {};  // io calls wrapped since the last injection round
+static uint32_t lengthAborts {};  // rounds dropped before anything could be rewritten
 
 static IOReturn patched_device_request(void *that, IOService *provider, StandardUSB::DeviceRequest &request, void *data,
                                        IOMemoryDescriptor *descriptor, unsigned int &length,
@@ -131,6 +138,9 @@ static IOReturn patched_device_request(void *that, IOService *provider, Standard
         action = BTLEAdv::onCommand(hciState, hci, hciLength, patchScanning);
         IOLockUnlock(hciLock);
         remoteReads = BTLEAdv::extraRemoteReads(lengthState, hci, hciLength);
+        // A new round starts from a full budget of wrapped reads, whichever round came before.
+        if (remoteReads)
+            wrappedReads = 0;
     }
     for (unsigned i = 0; i < remoteReads; ++i) {
         // Sent before the real command, as IntelBTPatcher does: the three completions carry the
@@ -217,13 +227,12 @@ struct DelayedCompletion {
 static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uint32_t bytesTransferred) {
     auto *delayed = static_cast<DelayedCompletion *>(owner);
     IOMemoryDescriptor *buffer = delayed->buffer;
-    // Tahoe hands over the buffer the stack already prepared, so prepare() is refused there and
-    // the bytes are read directly, the way IntelBTPatcher does it. Only a hold this call took is
-    // released again: when prepare() is refused the hold belongs to the USB stack, and completing
-    // it here would release that one instead.
+    // writeBytes() needs the descriptor wired for writing, and the stack only wires the direction
+    // it prepared: writing a buffer this call didn't prepare panics with "IOGMD: not wired for the
+    // IODMACommand". A hold taken here is also the only one released here.
     if (status == kIOReturnSuccess && buffer && bytesTransferred >= 6 &&
-        buffer->getLength() >= BTLEAdv::kDataLengthEventLength) {
-        const IOReturn prepared = buffer->prepare(kIODirectionInOut);
+        buffer->getLength() >= BTLEAdv::kDataLengthEventLength &&
+        buffer->prepare(kIODirectionInOut) == kIOReturnSuccess) {
         uint8_t event[32] = {};
         const size_t size = min(size_t(bytesTransferred), sizeof(event));
         buffer->readBytes(0, event, size);
@@ -238,10 +247,17 @@ static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uin
                 noteHook("BTLEAdvLengthRewrites", ++lengthRewrites);
             } else {
                 noteHook("BTLEAdvLengthFailures", ++lengthFailures);
+                // A duplicate that can't be rewritten can't be waited for either.
+                lengthState = BTLEAdv::DataLengthState {};
             }
         }
-        if (prepared == kIOReturnSuccess)
-            buffer->complete(kIODirectionInOut);
+        buffer->complete(kIODirectionInOut);
+    } else {
+        // Nothing can be rewritten into this read (failed transfer, buffer too small for the
+        // longest rewritten event, or no hold of our own): drop the pending duplicates so no
+        // further completion is wrapped. bluetoothd keeps the timeout it already had.
+        lengthState = BTLEAdv::DataLengthState {};
+        noteHook("BTLEAdvLengthAborts", ++lengthAborts);
     }
     const IOUSBHostCompletion original = delayed->original;
     IOFree(delayed, sizeof(*delayed));
@@ -251,7 +267,10 @@ static void rewriteCompletion(void *owner, void *parameter, IOReturn status, uin
 
 static IOReturn patched_pipe_io(void *that, IOMemoryDescriptor *dataBuffer, uint32_t bytesTransferred,
                                 IOUSBHostCompletion *completion, uint32_t completionTimeoutMs) {
-    if (completion && dataBuffer && that == interruptPipe && lengthState.outstanding) {
+    if (completion && dataBuffer && that == interruptPipe && lengthState.outstanding &&
+        wrappedReads < kMaxWrappedReads &&
+        dataBuffer->getLength() >= BTLEAdv::kDataLengthEventLength) {
+        ++wrappedReads;
         auto *delayed = static_cast<DelayedCompletion *>(IOMalloc(sizeof(DelayedCompletion)));
         if (delayed) {
             delayed->original = *completion;
