@@ -31,7 +31,10 @@ with tempfile.TemporaryDirectory(prefix="forbiddenitlwm-tests-") as directory:
 subprocess.run(["python3", str(root / "tests/monitor_tx_ownership.py")], check=True)
 subprocess.run(["python3", str(root / "tests/monitor_channel.py")], check=True)
 subprocess.run(["python3", str(root / "tests/monitor_probe.py")], check=True)
-subprocess.run(["python3", str(root / "tests/btleadv_patterns.py")], check=True)
+# The pattern set for the bluetoothd installed here (PR #1); 26.7.1's set elsewhere.
+build = subprocess.check_output(["sw_vers", "-buildVersion"], text=True).strip()
+pattern_set = {"25G241": "2671", "25G332": "2672", "25G342": "2673"}.get(build, "2671")
+subprocess.run(["python3", str(root / "tests/btleadv_patterns.py"), "--set", pattern_set], check=True)
 # The same-channel probe model and its source pins (PR #47); it builds its own test (audit T02).
 subprocess.run(["python3", str(root / "tests/portable_rx/test-samech.py")], check=True)
 # The Sonoma set needs a 14.8.9 bluetoothd. Point this at one to check it.
@@ -50,3 +53,8 @@ subprocess.run(["python3", str(root / "tests/awdl_snapshot.py")], check=True)
 subprocess.run(["python3", str(root / "tests/awdl_bridge.py")], check=True)
 subprocess.run(["python3", str(root / "tests/awdl_pool_lease.py")], check=True)
 subprocess.run(["python3", str(root / "tests/awdl_rx_copy.py")], check=True)
+with tempfile.TemporaryDirectory(prefix="forbidden-lqm-") as directory:
+    output = str(Path(directory) / "wcl_lqm_merge")
+    subprocess.run(["xcrun", "clang++", "-std=c++14", "-fsanitize=address,undefined",
+                    str(root / "tests/wcl_lqm_merge.cpp"), "-o", output], check=True)
+    subprocess.run([output], check=True)
