@@ -100,6 +100,7 @@ Users on Reddit and GitHub have reported:
 | Intel AX210 (desktop, Intel NUC8i7HVK) | macOS 26.7.3, with the same-channel fix (PR #47): 19–26 MiB/s with the iPhone's network on 149 (issue #24) |
 | Intel AX201 | macOS 26.7.3, with 0.6.0-alpha.1 in Japan: listener on channel 44 at 80 MHz, Mac → iPhone 26 MB/s, iPhone → Mac 27.6 MB/s (issues #17, #21) |
 | Intel AX201 (Lenovo AIO, Tiger Lake) | macOS Sequoia 15.8.2, with 0.6.0-alpha.1 in China: iPhone → Mac about 40 MB/s, Mac → iPhone 27–31 MB/s, block ack agreed (issue #24). With 0.5.4-beta.2: Handoff works, but its badge shows an old device name; Instant Hotspot doesn't (issue #40) |
+| Intel AX201 | macOS Sequoia 15.8.1, with 0.6.0-alpha.1, Mac's Wi-Fi and the listener both on 149: Mac → iPhone 28–30 MB/s, iPhone → Mac 36 MB/s, block ack agreed (issue #24) |
 | Intel AX211 (Dell XPS) | macOS 26.7.3, with 0.6.0-alpha.1 in the UK, router on 44: iPhone → Mac works on 44 (it didn't on 0.5.4); Mac → iPhone stalls (issues #17, #63, open) |
 | Intel AX201 (CNVi, Alder Lake or newer) | macOS 26.7.3: AirDrop with an iPad works both ways; with 0.6.0-alpha.1 and an iPhone 17 Pro it fails (issue #45, open) |
 | Intel AX210 | Sonoma 14.8.9, with 0.5.4-beta.2: the listener starts, but `awdl0` isn't created (issue #55, open) |
