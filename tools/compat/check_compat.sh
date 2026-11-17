@@ -203,7 +203,15 @@ kext_version() { printf '%s\n' "$KEXTS" | awk -v id="$1" '$1 == id { gsub(/[()]/
 FORBIDDEN=$(kext_version org.forbiddenitlwm.ForbiddenItlwm)
 AIRPORT=$(kext_version com.zxystd.AirportItlwm)
 ITLWM=$(kext_version com.zxystd.itlwm)
-if [ -n "$FORBIDDEN" ]; then
+# kmutil doesn't list it on every machine (#73, macOS 26.7.4 RC); the driver's own registry entry still shows it.
+FORBIDDEN_IOREG=""
+if [ -z "$FORBIDDEN" ] && ioreg -l -w0 2>/dev/null | grep -q '"CFBundleIdentifier" = "org.forbiddenitlwm.ForbiddenItlwm"'; then
+    FORBIDDEN_IOREG=1
+fi
+if [ -n "$FORBIDDEN_IOREG" ]; then
+    pass "ForbiddenItlwm is loaded (found in the I/O Registry; kmutil didn't list it)."
+    [ -n "$AIRPORT" ] && fail "AirportItlwm $AIRPORT is loaded too. Remove it: the two can't run side by side."
+elif [ -n "$FORBIDDEN" ]; then
     pass "ForbiddenItlwm $FORBIDDEN is loaded."
     [ -n "$AIRPORT" ] && fail "AirportItlwm $AIRPORT is loaded too. Remove it: the two can't run side by side."
 elif [ -n "$AIRPORT" ]; then
@@ -346,9 +354,20 @@ fi
 if [ -z "$SP" ]; then
     warn "macOS returned no Wi-Fi details (is Wi-Fi on?)."
 elif [ -z "$CC" ] || [ "$CC" = "ZZ" ] || [ "$CC" = "00" ]; then
-    warn "Country code: ${CC:-none}. The firmware hasn't learned a country, so channels 149 and 44 are listen-only for now."
-    warn "AirDrop will use channel 6 (very slow) until a nearby network advertises the country."
-    CH149_STATE=no-country
+    # Without a country, the driver still uses 149 or 44 once it has heard a router beaconing there (or the
+    # station is connected in the same band), so the listener's own channel decides, when the build runs.
+    LISTEN_CH=""
+    [ -n "$MARKER" ] && LISTEN_CH=$(ioreg -l -w0 2>/dev/null | sed -n 's/.*"ITLAWDLCoexChannel" = \([0-9]*\).*/\1/p' | head -1)
+    if [ "$LISTEN_CH" = "149" ] || [ "$LISTEN_CH" = "44" ]; then
+        info "Country code: ${CC:-none}. The firmware hasn't learned a country, but the listener is on channel $LISTEN_CH:"
+        info "routers heard on that channel (or your Wi-Fi in the same band) let the driver use it anyway."
+        CH149_STATE=no-country-open
+    else
+        warn "Country code: ${CC:-none}. The firmware hasn't learned a country, so channels 149 and 44 are listen-only for now."
+        warn "AirDrop will use channel 6 (very slow) until a nearby network advertises the country, or until routers"
+        warn "are heard on 149 or 44."
+        CH149_STATE=no-country
+    fi
 else
     pass "Country code: $CC. The firmware (or macOS's location, when the firmware has none) reports a country."
     CH149_STATE=country
