@@ -38,6 +38,15 @@ The firmware opens channel 149 only after a nearby network tells it the country.
 - **Channels 149 to 161 marked passive** (China, for example): from 0.5.0, once the hackintosh hears a Wi-Fi network's beacon on one of these channels, the listener may use it (Linux does this only before the country is known; here it also counts after, see HOW-IT-WORKS). `ITLAWDLCoexBeaconHints` shows which channels were heard (bits 0 to 3 = 149, 153, 157, 161). A router on 149 at 80 MHz covers all four. The same applies to 36 to 48 for channel 44 (bits 8 to 11). From 0.6.0 such a channel can also be used while the Mac's own Wi-Fi is connected on a channel in the same group (36–48, 52–64, 100–144 or 149–165), if the firmware marks it for that (Linux's rule for Wi-Fi Direct interfaces): `ITLAWDLCoexIrConcurrent` lists the channels, `ITLAWDLCoexIrConcurrentUsed` counts the uses. With neither, AirDrop stays on 6.
 - The driver never overrides the country's rules, and `itlwm_cc` doesn't help.
 
+## The listener moves between 44 and 149
+
+`ITLAWDLCoexMoves` and `ITLAWDLCoexPeer5GHzChanges` keep rising, `ITLAWDLCoexChannel` alternates between 44 and 149, and `ITLAWDLCoexBaTxStateName` falls back to `asking` or `off` after each move ([#68](https://github.com/retropineaple/ForbiddenItlwm/issues/68)). Transfers are slow or never finish.
+
+Seen with the router on channel 44 and the other device on the same network. That device's channel sequence then has 44 in most slots, its Wi-Fi slots included, and 149 in a few AWDL slots, for example `<2c2c952c2c2c2c2c06952c9595952c2c>`. The listener follows it to 149; when a later sequence leaves 149 out, it comes back to 44.
+
+- **Test flag:** add `-itlawdlsta44`. While the Mac's own Wi-Fi is on 44, the listener then stays on 44 and shares the station's channel. `ITLAWDLCoexStation44` shows Yes, and `ITLAWDLCoexMoves` should stay at 0. Confirmed with a MacBook Air M1 on an AX200 (27 MB/s to the hackintosh, 20 MB/s from it); not tested with iPhones, so please report your result.
+- **Without the flag:** move the router off 44. On 100 and up the listener keeps 44 at 80 MHz to itself, but the radio then time-shares between the two channels.
+
 ## The iPhone doesn't list the Mac
 
 - **Bluetooth:** it must be on, with BTLEAdvFixup for your macOS version loaded, `-btleadv` set and IntelBTPatcher disabled. AirDrop finds devices over Bluetooth LE first. BTLEAdvFixup's patterns only match specific builds (26.7.1 and, from 0.8.1, 26.7.3 and 26.7.2, with 26.7.2's own pattern for one site from 0.9.1, on Tahoe; 15.8, 15.8.2 and 15.8.3 on Sequoia; from 0.9.0, 14.8.9 on Sonoma): `check_compat.sh` shows whether they match yours. To check it's running: `ioreg -l -w0 -d1 | grep '"BTLEAdv'` should show `BTLEAdvHookRouted` = 1. On Sequoia, BTLEAdvFixup before 0.8.3 never started.

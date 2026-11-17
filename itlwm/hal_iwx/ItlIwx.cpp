@@ -6035,6 +6035,10 @@ static bool awdlCoexSameBand;
 // (ITLAWDLCoexOverlap, for the channel picked last). -itlawdloverlap80 keeps the old choice, for comparison.
 static uint8_t awdlCoexOverlapState;
 static bool awdlCoexOverlap80;
+// Test (-itlawdlsta44, #68): while the station itself is on 44, the listener shares it instead of following
+// the peer's 149 slots. A peer on the same router names 44 in its Wi-Fi slots and 149 in some AWDL slots, and
+// the min rule then moved the listener between 44 and 149 every few seconds.
+static bool awdlCoexStation44;
 // Block Ack on the shared context (#16, #24): when the listener shares the station's binding (without
 // -itlawdlcoexmulti, or in its fallback), receive and send Block Ack run there as well. Until 0.5.3 they
 // ran only with the listener on its own context, so a shared listener answered no ADDBA request and sent
@@ -6716,6 +6720,7 @@ static void awdlCoexPublish()
         root->setProperty("ITLAWDLCoexBeaconHints", awdlCoexBeaconHints, 32);
         root->setProperty("ITLAWDLCoexOverlap", awdlCoexOverlapState, 8);
         root->setProperty("ITLAWDLCoexPeer5GHz", awdlCoexPeer5G, 32);
+        root->setProperty("ITLAWDLCoexStation44", awdlCoexStation44);
         root->setProperty("ITLAWDLCoexPeer5GHzFrames", awdlCoexPeer5GFrames, 32);
         root->setProperty("ITLAWDLCoexPeer5GHzChanges", awdlCoexPeer5GChanges, 32);
         root->setProperty("ITLAWDLCoexCountryFailures", awdlCoexCountryFailures, 32);
@@ -15509,7 +15514,9 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
     // The min rule (PR #21): what the phone's AWDL slots name, while it was heard in the last 10 minutes.
     const bool peerFresh = awdlCoexPeer5G && awdlUptimeUS() - awdlCoexPeer5GUS < kAwdlCoexPeer5GLifeUS;
     const unsigned peerCh = peerFresh ? awdlCoexPeerChannel(awdlCoexPeerSeq) : 0U;
-    const bool names44 = peerCh == 44;
+    const bool stationOn44 = awdlCoexStation44 && ic->ic_state == IEEE80211_S_RUN && ic->ic_bss &&
+        ic->ic_bss->ni_chan && ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan) == 44;
+    const bool names44 = peerCh == 44 || stationOn44;
     const bool names149 = peerFresh && awdlCoexPeerNames(awdlCoexPeerSeq, 149);
     int pick = 0;
     uint8_t w = IWX_PHY_VHT_CHANNEL_MODE20;
@@ -20697,6 +20704,7 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
             awdlBtCoexRequest = requestedCoexBt;
         awdlCoexSameBand = PE_parse_boot_argn("-itlawdlsameband", &dummy, sizeof(dummy));
         awdlCoexOverlap80 = PE_parse_boot_argn("-itlawdloverlap80", &dummy, sizeof(dummy));
+        awdlCoexStation44 = PE_parse_boot_argn("-itlawdlsta44", &dummy, sizeof(dummy));
         awdlCoexNoSharedBa = PE_parse_boot_argn("-itlawdlnosharedba", &dummy, sizeof(dummy));
         awdlCoexMultiState = awdlCoexMulti ? "not-added" : "off";
         if (awdlCoexTx) {
