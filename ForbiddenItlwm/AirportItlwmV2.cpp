@@ -1822,6 +1822,23 @@ bool AirportItlwm::startDriver(IOService *provider)
     int he_enabled = 0;
     if (PE_parse_boot_argn("itlwm_he", &he_enabled, sizeof(he_enabled)) && he_enabled == 1)
         fHalService->get80211Controller()->ic_userflags |= IEEE80211_F_HEON;
+    // itlwm_scanout=N (120..480 TU): longer visits off the home channel during full scans while
+    // associated, so several passive channels are covered per visit. Out of range or unset: 120.
+    {
+        extern uint32_t itlScanMaxOutTU;
+        uint32_t scanOut = 0;
+        if (PE_parse_boot_argn("itlwm_scanout", &scanOut, sizeof(scanOut)) && scanOut >= 120 && scanOut <= 480)
+            itlScanMaxOutTU = scanOut;
+        setProperty("ItlwmScanMaxOutTU", itlScanMaxOutTU ? itlScanMaxOutTU : 120U, 32);
+    }
+    // itlwm_lqmint=N (1..60 s): link-quality updates to WCL only on a 3 dB RSSI change or every N s.
+    {
+        extern uint32_t itlLqmMinIntervalSec;
+        uint32_t lqmInterval = 0;
+        if (PE_parse_boot_argn("itlwm_lqmint", &lqmInterval, sizeof(lqmInterval)) && lqmInterval >= 1 && lqmInterval <= 60)
+            itlLqmMinIntervalSec = lqmInterval;
+        setProperty("ItlwmLqmMinIntervalSec", itlLqmMinIntervalSec, 32);
+    }
 #endif
 
     if (!fHalService->attach(pciNub)) {
