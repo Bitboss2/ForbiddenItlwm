@@ -40,6 +40,7 @@ The firmware opens channel 149 only after a nearby network tells it the country.
 
 ## The iPhone doesn't list the Mac
 
+- **Boot flags:** check that the whole tested set from [BOOT-FLAGS.md](BOOT-FLAGS.md) is set, not part of it. Without `-itlawdlmitx` the driver, the listener, `awdl0` and Bluetooth all look healthy and `ITLAWDLCoexPeerSyncFrames` rises, but `ItlwmAWDLMiState` is `off`, `ItlwmAWDLSyncMIBuilt` stays 0 and `ITLAWDLCoexDataRx` stays 0: the other device hears the Mac but never learns it offers AirDrop. `check_compat.sh` checks the whole set and `ItlwmAWDLMiState`.
 - **Bluetooth:** it must be on, with BTLEAdvFixup for your macOS version loaded, `-btleadv` set and IntelBTPatcher disabled. AirDrop finds devices over Bluetooth LE first. BTLEAdvFixup's patterns only match specific builds (26.7.1 and, from 0.8.1, 26.7.3 and 26.7.2, with 26.7.2's own pattern for one site from 0.9.1, on Tahoe; 15.8, 15.8.2 and 15.8.3 on Sequoia; from 0.9.0, 14.8.9 on Sonoma): `check_compat.sh` shows whether they match yours. To check it's running: `ioreg -l -w0 -d1 | grep '"BTLEAdv'` should show `BTLEAdvHookRouted` = 1. On Sequoia, BTLEAdvFixup before 0.8.3 never started.
 - **AirDrop settings:** with Contacts Only, the two devices must share an Apple Account or know each other as contacts. Try Everyone for 10 Minutes to rule this out.
 - **Is the iPhone heard?** Read `ITLAWDLCoexPeerSyncFrames` twice, a few seconds apart, with the iPhone's share sheet open. If it rises, the radios hear each other.

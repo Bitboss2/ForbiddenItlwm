@@ -475,12 +475,42 @@ if [ -n "$MARKER" ]; then
         fi
     fi
     ARGS=$(sysctl -n kern.bootargs 2>/dev/null)
+    # The tested set from docs/BOOT-FLAGS.md; keep the two in step. Flags without a value must match
+    # whole words; the two with a value (itlawdlintcoal=, itlawdltxqueue=) match by name.
     MISSING=""
     for f in -btleadv -itlawdlcoexprobe -itlawdliface -itlawdlnativeup -itlawdlcoexrx -itlawdlcoextx -itlawdlcoexmulti \
-             -itlawdlcoexdata -itlawdlcoexbatx -itlawdlcoexpeerpause; do
+             -itlawdlcoexdata -itlawdlmitx -itlawdlelicit -itlawdlcaps -itlawdlsvcmerge -itlawdlawsync \
+             -itlawdlcoexbatx -itlawdlcoexpeerpause -itlawdlcoexbatrace; do
         case " $ARGS " in *" $f "*) ;; *) MISSING="$MISSING $f";; esac
     done
-    [ -z "$MISSING" ] && pass "The main AirDrop boot flags are set." || warn "Missing AirDrop boot flags:$MISSING"
+    for f in itlawdlintcoal itlawdltxqueue; do
+        case " $ARGS" in *" $f="*) ;; *) MISSING="$MISSING $f=";; esac
+    done
+    if [ -z "$MISSING" ]; then
+        pass "All AirDrop boot flags of the tested set are set."
+    else
+        warn "Missing AirDrop boot flags:$MISSING"
+        warn "Use the whole tested set from docs/BOOT-FLAGS.md: a partial set can pass every other check here and still not work."
+        FLAGS_MISSING=1
+    fi
+    # Without the announcement (-itlawdlmitx) the sync frames carry no name or services, so other devices
+    # hear this Mac but never learn it offers AirDrop: nothing is listed and no AirDrop data arrives.
+    MI_STATE=$(ioreg -l -w0 2>/dev/null | sed -n 's/.*"ItlwmAWDLMiState" = "\([^"]*\)".*/\1/p' | head -1)
+    case "$MI_STATE" in
+        on) pass "The AirDrop announcement is on (ItlwmAWDLMiState = on).";;
+        "") ;;
+        off) case " $ARGS " in
+                 *" -itlawdlmitx "*) warn "The AirDrop announcement is off (ItlwmAWDLMiState = off) although -itlawdlmitx is set.";;
+                 *) fail "The AirDrop announcement is off (ItlwmAWDLMiState = off) because -itlawdlmitx isn't set. Other devices"
+                    fail "can't discover this Mac: the radios hear each other, but no AirDrop data arrives (ITLAWDLCoexDataRx stays 0).";;
+             esac
+             MI_OFF=1;;
+        blocked*)
+            # Not a flag problem: on a build the driver hasn't verified, the announcement stays off (section 1).
+            warn "The AirDrop announcement is blocked: ItlwmAWDLMiState = $MI_STATE."
+            warn "The driver only sends it on verified macOS builds, so other devices won't list this Mac.";;
+        *)  warn "The AirDrop announcement isn't running: ItlwmAWDLMiState = $MI_STATE."; MI_OFF=1;;
+    esac
 else
     info "Skipped: the AirDrop build isn't running."
 fi
@@ -533,6 +563,9 @@ case "${CH149_STATE:-}" in
 esac
 if [ "$NET_STACK" = pf ]; then
     echo "  ${YEL}pf has turned off macOS's user-space network path (section 7): AirDrop works, but transfers can be slower.${RST}"
+fi
+if [ -n "${FLAGS_MISSING:-}" ] || [ -n "${MI_OFF:-}" ]; then
+    echo "  ${YEL}The AirDrop boot flags are incomplete (section 6). Set the whole tested set from docs/BOOT-FLAGS.md before testing.${RST}"
 fi
 if [ "$BLOCKERS" -gt 0 ]; then
     echo "  ${RED}$BLOCKERS blocker(s) above stop it working on this Mac regardless of the card.${RST}"
