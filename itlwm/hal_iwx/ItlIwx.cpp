@@ -178,6 +178,13 @@ static inline unsigned awdlCoex80BlockFirst(unsigned ch)
     return 0;
 }
 static uint64_t awdlCoexLastMoveUS;
+// A move between two usable 5 GHz channels waits for a choice that held this long, and for this long
+// without AWDL data (#68). ITLAWDLCoexMovesSettleDropped counts choices that changed before they settled.
+static constexpr uint64_t kAwdlCoexMoveSettleUS = 60000000ULL, kAwdlCoexMoveQuietUS = 30000000ULL;
+static int awdlCoexSettleWant, awdlCoexSettleGen = -1;
+static uint8_t awdlCoexSettleWidth;
+static uint64_t awdlCoexSettleSinceUS;
+static uint32_t awdlCoexMovesSettleDropped;
 // A move waits for the listener's ring to drain; nothing new is submitted meanwhile (iface129 review, 1).
 static bool awdlCoexMovePending;
 static bool awdlCoexData; // -itlawdlcoexdata
@@ -6709,6 +6716,7 @@ static void awdlCoexPublish()
         root->setProperty("ITLAWDLCoexOwnWidth", uint32_t(awdlCoexOwnWidth), 32);
         root->setProperty("ITLAWDLCoexMoves", awdlCoexMoves, 32);
         root->setProperty("ITLAWDLCoexMoveFailures", awdlCoexMoveFailures, 32);
+        root->setProperty("ITLAWDLCoexMovesSettleDropped", awdlCoexMovesSettleDropped, 32);
         root->setProperty("ITLAWDLCoexCountryNotices", awdlCoexCountryNotices, 32);
         root->setProperty("ITLAWDLCoexCountryAnswers", awdlCoexCountryAnswers, 32);
         root->setProperty("ITLAWDLCoexCountryLastStatus", awdlCoexCountryLastStatus, 32);
@@ -15434,15 +15442,20 @@ awdlCoexMacSend(struct iwx_softc *sc, uint32_t action)
 // (no passive, no radar, ad hoc allowed; at 80 MHz on the whole block). Then 6 at 20 MHz. The station's own
 // 80 MHz block with another primary makes it 20 MHz; a 160 MHz station channel over it skips it (#26). 80 MHz is
 // not tried again in a generation where its PHY command failed.
+// Whether the firmware's channel map lets the listener use ch at all (any width).
+static bool
+awdlCoexChannelUsable(struct ieee80211com *ic, unsigned ch)
+{
+    const auto &c = ic->ic_channels[ch];
+    return c.ic_freq && isset(ic->ic_chan_active, ch) && !awdlCoexNoIr(ic, ch) &&
+        !(c.ic_flags & (IEEE80211_CHAN_DFS | IEEE80211_CHAN_NOADHOC));
+}
+
 static int
 awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    auto usable = [ic](unsigned ch) {
-        const auto &c = ic->ic_channels[ch];
-        return c.ic_freq && isset(ic->ic_chan_active, ch) && !awdlCoexNoIr(ic, ch) &&
-            !(c.ic_flags & (IEEE80211_CHAN_DFS | IEEE80211_CHAN_NOADHOC));
-    };
+    auto usable = [ic](unsigned ch) { return awdlCoexChannelUsable(ic, ch); };
     uint32_t hints = isset(ic->ic_beacon_hint, 6) ? 16U : 0U;
     for (unsigned ch = 149, bit = 1; ch <= 161; ch += 4, bit <<= 1)
         if (isset(ic->ic_beacon_hint, ch))
@@ -15613,11 +15626,35 @@ awdlCoexRetarget(struct iwx_softc *sc)
     const int have = own->channel ? ieee80211_chan2ieee(ic, own->channel) : 0;
     const int haveWidth = awdlCoexOwnWidth;
     // Same channel and the same width: nothing to do. 20 MHz and 80 MHz on one channel are different choices.
+    const uint64_t now = awdlUptimeUS();
     if (!want || (want == have && (width == IWX_PHY_VHT_CHANNEL_MODE80) == (haveWidth == 80))) {
+        if (awdlCoexSettleWant) {
+            ++awdlCoexMovesSettleDropped;
+            awdlCoexSettleWant = 0;
+        }
         awdlCoexMovePending = false;
         return;
     }
-    const uint64_t now = awdlUptimeUS();
+    // From one usable 5 GHz channel to another (44 and 149), only on a choice that held for
+    // kAwdlCoexMoveSettleUS and not within kAwdlCoexMoveQuietUS of AWDL data (#68). The choice follows the
+    // last channel sequence heard from any nearby device, which can alternate every few seconds, and each
+    // move also drops the block-ack peer, so a transfer was cut off by the next one. A channel the map
+    // withdrew, and moves to or from 6, aren't held.
+    if (!awdlCoexMovePending && want != 6 && have && have != 6 && awdlCoexChannelUsable(ic, unsigned(have))) {
+        // A choice from an earlier listener (another generation) starts over.
+        if (want != awdlCoexSettleWant || width != awdlCoexSettleWidth || awdlCoexSettleGen != gen) {
+            if (awdlCoexSettleWant)
+                ++awdlCoexMovesSettleDropped;
+            awdlCoexSettleWant = want;
+            awdlCoexSettleWidth = width;
+            awdlCoexSettleSinceUS = now;
+            awdlCoexSettleGen = gen;
+        }
+        const bool dataRecent = awdlCoexLastDataUS && now - awdlCoexLastDataUS < kAwdlCoexMoveQuietUS;
+        if (dataRecent || now - awdlCoexSettleSinceUS < kAwdlCoexMoveSettleUS)
+            return;
+    }
+    awdlCoexSettleWant = 0;
     // Up to 5 GHz (149 or 44) at most every 10 s; back to 6 at once.
     if (want != 6 && awdlCoexLastMoveUS && now - awdlCoexLastMoveUS < 10000000ULL) {
         awdlCoexMovePending = false;
