@@ -27,7 +27,7 @@ What's being worked on, what comes next, and what's planned further out. These a
 - **Continuity Camera:** using the iPhone as the Mac's webcam ([PR #72](https://github.com/retropineaple/ForbiddenItlwm/pull/72)).
 - **A unified Bluetooth kext that survives macOS updates:** one Bluetooth kext made for ForbiddenItlwm, replacing BTLEAdvFixup, IntelBluetoothFirmware and BlueToolFixup, with patches that keep working across small macOS updates.
 - **A look at Ventura 13.** Ventura needs its own study of that version's Wi-Fi stack first, so it isn't certain.
-- **Sleep and wake:** not tested on the project's hackintosh, where sleep is disabled. One user reports two nights of scheduled sleep with AirDrop on and no problems ([#38](https://github.com/retropineaple/ForbiddenItlwm/issues/38)).
+- **Sleep and wake:** not tested on the project's hackintosh, where sleep is disabled. One user reports five nights of scheduled sleep with AirDrop on: four woke normally, and on one the driver stayed unavailable until Wi-Fi was turned off and on ([#38](https://github.com/retropineaple/ForbiddenItlwm/issues/38)).
 
 ## Not planned
 
