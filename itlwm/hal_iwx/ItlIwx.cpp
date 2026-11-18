@@ -6071,6 +6071,14 @@ static uint32_t awdlCoexPeerSeqFrames, awdlCoexPeerSeqChanges;
 // other slots there (#35: 48 in slots 0, 1, 9 and 11 as well), so a channel that appears in those four slots is
 // the phone's Wi-Fi and doesn't count, unless wifiToo: then it counts if it also appears in another slot.
 // Based on PR #21's min rule (zheznanohana).
+// Whether the phone's sequence puts it on ch in any of its 16 slots, Wi-Fi slots included: it can be met there.
+static bool awdlCoexPeerVisits(const uint8_t seq[16], unsigned ch)
+{
+    for (unsigned n = 0; n < 16; ++n)
+        if (seq[n] == ch)
+            return true;
+    return false;
+}
 static bool awdlCoexPeerNames(const uint8_t seq[16], unsigned ch, bool wifiToo = false)
 {
     if (!wifiToo && (seq[6] == ch || seq[7] == ch || seq[14] == ch || seq[15] == ch))
@@ -15531,7 +15539,7 @@ awdlCoexPickOwn(struct iwx_softc *sc, uint8_t *width)
     const unsigned peerCh = peerFresh ? awdlCoexPeerChannel(awdlCoexPeerSeq) : 0U;
     // On merge: only while the peer itself is seen on 44, in any slot (its Wi-Fi slots count here), so the
     // flag never keeps the listener on 44 for a peer that never comes there.
-    const bool stationOn44 = awdlCoexStation44 && peerFresh && awdlCoexPeerNames(awdlCoexPeerSeq, 44, true) &&
+    const bool stationOn44 = awdlCoexStation44 && peerFresh && awdlCoexPeerVisits(awdlCoexPeerSeq, 44) &&
         ic->ic_state == IEEE80211_S_RUN && ic->ic_bss && ic->ic_bss->ni_chan &&
         ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan) == 44;
     const bool names44 = peerCh == 44 || stationOn44;
@@ -15652,7 +15660,15 @@ awdlCoexRetarget(struct iwx_softc *sc)
     // last channel sequence heard from any nearby device, which can alternate every few seconds, and each
     // move also drops the block-ack peer, so a transfer was cut off by the next one. A channel the map
     // withdrew, and moves to or from 6, aren't held.
-    if (!awdlCoexMovePending && want != 6 && have && have != 6 && awdlCoexChannelUsable(ic, unsigned(have))) {
+    // Not held when the peer never comes to the channel the listener is on (no slot names it, its Wi-Fi slots
+    // included) and does come to the new one: staying helps nobody (a 44-only phone heard while on 149, #35).
+    const bool peerSeqFresh = awdlCoexPeer5G && now - awdlCoexPeer5GUS < kAwdlCoexPeer5GLifeUS;
+    const bool haveUnvisited = peerSeqFresh && have > 0 && have <= 255 &&
+        !awdlCoexPeerVisits(awdlCoexPeerSeq, unsigned(have)) && awdlCoexPeerVisits(awdlCoexPeerSeq, unsigned(want));
+    if (haveUnvisited && awdlCoexSettleWant)
+        awdlCoexSettleWant = 0;
+    if (!haveUnvisited && !awdlCoexMovePending && want != 6 && have && have != 6 &&
+        awdlCoexChannelUsable(ic, unsigned(have))) {
         // A choice from an earlier listener (another generation) starts over.
         if (want != awdlCoexSettleWant || width != awdlCoexSettleWidth || awdlCoexSettleGen != gen) {
             if (awdlCoexSettleWant)
