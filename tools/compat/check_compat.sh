@@ -498,6 +498,7 @@ if [ -n "$MARKER" ]; then
     MI_STATE=$(ioreg -l -w0 2>/dev/null | sed -n 's/.*"ItlwmAWDLMiState" = "\([^"]*\)".*/\1/p' | head -1)
     case "$MI_STATE" in
         on) pass "The AirDrop announcement is on (ItlwmAWDLMiState = on).";;
+        on*) warn "The AirDrop announcement is on, on a build the driver hasn't verified: ItlwmAWDLMiState = $MI_STATE.";;
         "") ;;
         off) case " $ARGS " in
                  *" -itlawdlmitx "*) warn "The AirDrop announcement is off (ItlwmAWDLMiState = off) although -itlawdlmitx is set.";;
@@ -508,7 +509,8 @@ if [ -n "$MARKER" ]; then
         blocked*)
             # Not a flag problem: on a build the driver hasn't verified, the announcement stays off (section 1).
             warn "The AirDrop announcement is blocked: ItlwmAWDLMiState = $MI_STATE."
-            warn "The driver only sends it on verified macOS builds, so other devices won't list this Mac.";;
+            warn "The driver only sends it on verified macOS builds (or with -itlawdlanybuild, at the risk of a panic),"
+            warn "so other devices won't list this Mac.";;
         *)  warn "The AirDrop announcement isn't running: ItlwmAWDLMiState = $MI_STATE."; MI_OFF=1;;
     esac
 else

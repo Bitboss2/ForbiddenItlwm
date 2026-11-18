@@ -38,7 +38,7 @@ What each one does:
 | Flag | Effect |
 | --- | --- |
 | `itlawdltxpool=N` | Size of the `awdl0` transmit packet pool, 896 to 8192. Default 2048. Below that, long Mac → iPhone transfers can stall |
-| `-itlawdlanybuild` | Starts AirDrop on a macOS build the driver hasn't verified. **Risk of a kernel panic.** Only for testing a new build, from a USB stick. It doesn't override the check of Apple's AWDL function table |
+| `-itlawdlanybuild` | Starts AirDrop on a macOS build the driver hasn't verified. **Risk of a kernel panic.** Only for testing a new build, from a USB stick. From 0.6.0-beta.2 it also turns on the announcement (`-itlawdlmitx`), so other devices can list the Mac and AirDrop can really be tested; before, it stayed off there and nothing was listed. `ItlwmAWDLMiState` then reads "on (unverified build, -itlawdlanybuild)". It doesn't override the check of Apple's AWDL function table |
 | `itlawdlbtcoex=1` | Firmware Bluetooth coexistence mode 1. Fixed choppy Bluetooth audio during AirDrop on an older test build. Before 0.5.1 it only took effect in the monitor test mode |
 | `itlwm_scanout=N` | Longer off-channel visits for full scans while connected, N from 120 to 480 TU. By default each visit is capped at 120 TU, which fits one passive (DFS) channel before the 120 TU back home, so a full 5 GHz scan while connected can take 8–14 s and the Wi-Fi menu and Settings panel wait on it. 240–360 brought it to about 4.7 s on an AX210; 480 was slower. The 120 TU home time, low-latency scans and scans while not connected are unchanged. `ItlwmScanMaxOutTU` shows the value in use (#64) |
 | `itlwm_lqmint=N` | Posts a link-quality update only when the signal moves by 3 dB or more, or after N seconds (1 to 60). By default it's every 2 s plus every 8th beacon, which makes macOS announce a signal change about 1.7 times a second. macOS takes the link's signal only from these updates, so check that `printf 'show State:/Network/Interface/en0/LinkQuality\n' \| scutil` (your Wi-Fi interface) stays at 100 and that iMessage works. `ItlwmLqmMinIntervalSec` and `ItlwmWCLLqmSuppressed` show the setting and the updates held back (#64) |
@@ -76,7 +76,7 @@ Not needed for AirDrop. Listed so you know what they do if you find them in a gu
 | `-itlawdlpoolprobe` | Probes the `awdl0` packet pools once at start and publishes the result. Diagnostic only |
 | `-btlenoscan` | BTLEAdvFixup: advertising fixes only, without the scanning changes. For comparison |
 | `-btleadvdbg`, `-btleadvbeta` | Lilu's standard debug and beta switches for BTLEAdvFixup |
-| `itlwm_he=1` | Wi-Fi 6 (802.11ax), from the upstream driver. Untested with AirDrop; speeds vary (#58) |
+| `itlwm_he=1` | Wi-Fi 6 (802.11ax), from the upstream driver. One tester ran all their AirDrop tests with it without problems; not tested here, and speeds vary (#58) |
 | `-novht`, `-noht40` | Upstream: no 802.11ac, or no 40 MHz on the Mac's own Wi-Fi |
 
 ## Don't use

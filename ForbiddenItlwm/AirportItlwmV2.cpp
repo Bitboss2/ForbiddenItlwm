@@ -85,6 +85,7 @@ IOReturn ItlAWDLInterface::setAWDL_PEER_TRAFFIC_REGISTRATION(apple80211_awdl_pee
 }
 
 extern bool itlAWDLBuildVerified();
+extern bool itlAWDLBuildForced();
 
 void ItlAWDLInterface::acceptNativeRequests()
 {
@@ -93,10 +94,15 @@ void ItlAWDLInterface::acceptNativeRequests()
     int debug = 0;
     debugFlagsWanted = PE_parse_boot_argn("-itlawdlpmdebug", &debug, sizeof(debug));
     // The request carries a raw pointer at a fixed offset, a layout checked only for the verified
-    // builds. On any other build (expected, or allowed by -itlawdlanybuild) the copy stays off.
+    // builds. On an "expected" build the copy stays off. With -itlawdlanybuild it's on too, so an unverified
+    // build can be tested with AirDrop working (other devices list the Mac only with it): the pointer is then
+    // still range-checked and the copy validated (storeMasterIndication), but the layout isn't known to match.
     const bool wanted = PE_parse_boot_argn("-itlawdlmitx", &debug, sizeof(debug));
-    masterIndicationEnabled = wanted && itlAWDLBuildVerified();
-    setProperty("ItlwmAWDLMiState", !wanted ? "off" : masterIndicationEnabled ? "on" : "blocked: build not verified");
+    const bool verified = itlAWDLBuildVerified();
+    const bool forced = !verified && itlAWDLBuildForced();
+    masterIndicationEnabled = wanted && (verified || forced);
+    setProperty("ItlwmAWDLMiState", !wanted ? "off" : !masterIndicationEnabled ? "blocked: build not verified" :
+                forced ? "on (unverified build, -itlawdlanybuild)" : "on");
 }
 
 IOReturn ItlAWDLInterface::getAWDL_AF_TX_MODE(apple80211_awdl_af_tx_mode *data)

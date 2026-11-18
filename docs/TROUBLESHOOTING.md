@@ -24,7 +24,7 @@ The driver's log doesn't reach the unified log, so its state is only in the I/O 
 
 The driver only starts AirDrop on macOS builds whose Wi-Fi stack was checked: Tahoe 26.7.1 to 26.7.3, Sequoia 15.8 to 15.8.3 (15.8.1 and 15.8.2 run checked kernels; any other 15.8.x kernel starts as "expected"), and Sonoma 14.8.9.
 - **Nothing at all, and no ForbiddenItlwm keys:** check that you used the kexts for your macOS version. A ForbiddenItlwm built for another macOS version refuses to start, and logs `this kext is for macOS …`.
-- **`blocked: unverified macOS build`:** your build isn't on the list yet. Normal Wi-Fi still works. Please open an issue with your build (`sw_vers -buildVersion`) so it can be checked. `-itlawdlanybuild` forces AirDrop on anyway, at the risk of a kernel panic.
+- **`blocked: unverified macOS build`:** your build isn't on the list yet. Normal Wi-Fi still works. Please open an issue with your build (`sw_vers -buildVersion`) so it can be checked. `-itlawdlanybuild` forces AirDrop on anyway, announcement included from 0.6.0-beta.2, at the risk of a kernel panic. Use it only from a USB stick.
 - **`blocked: IO80211AWDLProtocol table differs`:** the Wi-Fi stack isn't the one the driver was checked against. If you applied OpenCore Legacy Patcher's "Modern Wireless" root patches, revert them. Otherwise Apple changed the part of its Wi-Fi stack the driver plugs into. Starting AirDrop would likely panic, so no flag overrides this. Please report your build.
 
 ## The listener is on channel 6, or `CountryLearned` is No
@@ -90,11 +90,20 @@ This is the main known problem. The time goes into the iPhone finding the Mac's 
 
 From 0.6.0 the driver counts what happens to macOS's scan requests (#20, #24, #45). After the list has looked wrong for a while, run `ioreg -l -w0 | grep -E '"ItlwmScan(Stats|StatsSTA|Last)"'` and post the output with your report. It holds counts only, no network names. On Sonoma, `ItlwmScanStats` exists from 0.6.0-beta.1 (0.6.0-alpha.1 had no counters there).
 
+## The Wi-Fi menu or the Wi-Fi settings are slow
+
+In a busy area, with many networks in range, the Wi-Fi menu and System Settings → Wi-Fi can take seconds to minutes to refresh ([#64](https://github.com/retropineaple/ForbiddenItlwm/issues/64)).
+
+- **Remove old remembered networks** in System Settings → Wi-Fi → Advanced. For every network it lists, macOS checks the whole remembered list; one user went from 148 remembered networks to 24, and the check from 1.7–4.6 s per row to 0.15 s. This is macOS, not the driver, and helped the most.
+- **Faster scans while connected:** the opt-in boot flag `itlwm_scanout=360` lets each off-channel visit cover several passive channels (BOOT-FLAGS). On an AX210 full scans went from 8–14 s to about 4.7 s.
+
 ## A new Bluetooth LE mouse or keyboard won't pair
 
 Fixed in BTLEAdvFixup 0.9.1 (from 0.5.4-beta.2, #27). Earlier versions, with IntelBTPatcher disabled, let a new LE mouse or keyboard connect but never finish pairing; devices paired before kept working. Update BTLEAdvFixup. If a device still won't pair with 0.9.1, check `ioreg -l -w0 -d 1 | grep -E '"BTLEAdv(PipeHooks|LengthRewrites|LengthFailures)"'` while pairing (`PipeHooks` should be 5, and `LengthRewrites` should go up) and report it.
 
 BTLEAdvFixup 0.9.2 (0.6.0-beta.1) also stops that fix from taking over the controller's event pipe when a pairing round doesn't finish ([PR #61](https://github.com/retropineaple/ForbiddenItlwm/pull/61)): with 0.9.1, that could leave USB devices unresponsive until a cold boot, or panic. `BTLEAdvLengthExpired` and `BTLEAdvLengthAborts` count rounds given up.
+
+**With BTLEAdvFixup 0.9.2 new LE mice and keyboards don't pair again** ([#71](https://github.com/retropineaple/ForbiddenItlwm/issues/71)): a security fix in it switched the data-length fix off completely, and no `BTLEAdvLength*` key ever appears. Use 0.9.3 (0.6.0-beta.2). `BTLEAdvEventPipes` should then be 1 or more.
 
 ## AirPods drop out while playing Apple Music
 
